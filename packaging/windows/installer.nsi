@@ -59,6 +59,13 @@ FunctionEnd
 Section "Machine-wide collector" SecMain
   SetRegView 64
   SetShellVarContext all
+
+  ; Stop the old collector before replacing its executable runtime or scripts.
+  ; The ProgramData log and attribution state are deliberately preserved.
+  nsExec::ExecToLog 'schtasks.exe /End /TN "CodexUsageCollectorMachine"'
+  nsExec::ExecToLog 'schtasks.exe /Delete /TN "CodexUsageCollectorMachine" /F'
+  Sleep 1500
+
   SetOutPath "$INSTDIR\runtime"
   File /r "${RUNTIME_DIR}\*.*"
   SetOutPath "$INSTDIR"
@@ -87,8 +94,6 @@ Section "Machine-wide collector" SecMain
   nsExec::ExecToLog 'netsh.exe advfirewall firewall delete rule name="Codex Usage Collector outbound"'
   nsExec::ExecToLog 'netsh.exe advfirewall firewall add rule name="Codex Usage Collector outbound" dir=out action=allow program="$INSTDIR\runtime\pythonw.exe" enable=yes profile=any protocol=TCP remoteport=${SERVER_PORT}'
 
-  nsExec::ExecToLog 'schtasks.exe /End /TN "CodexUsageCollectorMachine"'
-  nsExec::ExecToLog 'schtasks.exe /Delete /TN "CodexUsageCollectorMachine" /F'
   ; NSIS is a 32-bit process. Sysnative launches 64-bit PowerShell so it reads
   ; the same 64-bit HKLM registry view written above.
   nsExec::ExecToStack '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\register_machine_task.ps1"'

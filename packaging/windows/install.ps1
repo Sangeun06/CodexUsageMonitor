@@ -76,6 +76,16 @@ $StateFile = Join-Path $ConfigDir "collector-state.json"
 $TaskName = "CodexUsageCollector-$($env:USERNAME)"
 $Identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
+# Stop and remove the previous task before replacing a running script.
+$ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($ExistingTask) {
+    if ($ExistingTask.State -eq "Running") {
+        Stop-ScheduledTask -TaskName $TaskName
+        Start-Sleep -Milliseconds 750
+    }
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+}
+
 New-Item -ItemType Directory -Force -Path $InstallDir, $ConfigDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $BundleDir "collector.py") -Destination $InstalledCollector -Force
 Copy-Item -LiteralPath $TokenFile -Destination $InstalledToken -Force

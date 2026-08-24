@@ -69,7 +69,9 @@ echo "Installed collector for $(id -un)"
 echo "Central server: $server"
 
 if [[ "$start_service" == true ]]; then
-  if systemctl --user daemon-reload && systemctl --user enable --now codex-usage-collector.service; then
+  if systemctl --user daemon-reload && \
+     systemctl --user enable codex-usage-collector.service && \
+     systemctl --user restart codex-usage-collector.service; then
     systemctl --user status codex-usage-collector.service --no-pager || true
   else
     echo "Could not start the user service." >&2

@@ -24,6 +24,7 @@ class PackagingTest(unittest.TestCase):
         self.assertNotIn("sudo ", script)
         self.assertIn("systemctl --user", script)
         self.assertIn("install -m 600", script)
+        self.assertIn("systemctl --user restart", script)
 
     def test_windows_installer_is_non_admin_and_persistent(self):
         script = (ROOT / "packaging" / "windows" / "install.ps1").read_text()
@@ -34,6 +35,7 @@ class PackagingTest(unittest.TestCase):
         self.assertIn("pythonw.exe", script)
         self.assertIn("winget.exe", script)
         self.assertIn("--scope user", script)
+        self.assertLess(script.index("Stop-ScheduledTask"), script.index("Copy-Item"))
 
     def test_windows_machine_installer_requests_admin_and_runs_as_system(self):
         script = (ROOT / "packaging" / "windows" / "installer.nsi").read_text()
@@ -52,6 +54,7 @@ class PackagingTest(unittest.TestCase):
         self.assertIn("Sysnative\\WindowsPowerShell", script)
         self.assertIn("advfirewall firewall add rule", script)
         self.assertIn("SetRegView 64", script)
+        self.assertLess(script.index('schtasks.exe /End /TN "CodexUsageCollectorMachine"'), script.index('File /r "${RUNTIME_DIR}\\*.*"'))
 
     def test_release_checks_live_repository_visibility(self):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()

@@ -119,14 +119,14 @@ make bundle
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.4.4-linux-user-provisioned.tar.gz
+dist/codex-usage-collector-0.4.5-linux-user-provisioned.tar.gz
 ```
 
 이 파일 하나를 대상 서버에 안전하게 전송한 뒤 해당 사용자로 설치합니다.
 
 ```bash
-tar -xzf codex-usage-collector-0.4.4-linux-user-provisioned.tar.gz
-cd codex-usage-collector-0.4.4
+tar -xzf codex-usage-collector-0.4.5-linux-user-provisioned.tar.gz
+cd codex-usage-collector-0.4.5
 sha256sum -c SHA256SUMS
 ./install.sh
 ```
@@ -144,7 +144,7 @@ make bundle-windows
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.4.4-windows-user-provisioned.zip
+dist/codex-usage-collector-0.4.5-windows-user-provisioned.zip
 ```
 
 대상 Windows PC에서 ZIP을 푼 후 `install.cmd`를 더블클릭합니다. 관리자 권한은 필요하지 않으며, 현재 Windows 사용자 이름으로 작업 스케줄러에 등록되어 로그인할 때 자동으로 실행됩니다. 제거할 때는 같은 폴더의 `uninstall.cmd`를 실행합니다.
@@ -154,7 +154,7 @@ Windows 설치 프로그램은 Python 3을 먼저 탐색하고, 없으면 `winge
 ### Windows 관리자 EXE 설치 — 권장
 
 ```text
-dist/codex-usage-collector-0.4.4-windows-machine-setup.exe
+dist/codex-usage-collector-0.4.5-windows-machine-setup.exe
 ```
 
 EXE를 실행하고 UAC 관리자 권한 요청을 승인하면 다음 작업이 모두 자동으로 이루어집니다.
@@ -165,6 +165,8 @@ EXE를 실행하고 UAC 관리자 권한 요청을 승인하면 다음 작업이
 - `C:\Users\*\.codex`를 읽어 이 PC의 모든 Codex 사용자 집계
 - 중앙 서버 8765 포트로 나가는 프로그램별 Windows 방화벽 규칙 추가
 - Windows 앱 제거 목록에 제거 프로그램 등록
+
+기존 버전이 설치되어 있으면 설치기가 예약 작업과 실행 중인 수집기를 먼저 종료한 후 프로그램 파일을 교체하고 새 작업을 등록합니다. `ProgramData`의 `collector-state.json`과 회전 로그는 유지되므로 계정별 누적 사용량 추적 상태가 초기화되지 않습니다. 별도 제거 없이 새 EXE를 덮어 설치하면 됩니다.
 
 별도 Python 설치나 사용자별 수집기 설정은 필요하지 않습니다. 제거할 때는 Windows의 **설치된 앱**에서 `Codex Usage Collector`를 제거합니다.
 
@@ -188,7 +190,7 @@ make packages
 
 ## 비공개 GitHub Release
 
-이 저장소는 `v0.4.4`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
+이 저장소는 `v0.4.5`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
 
 저장소 설정에 다음 값을 등록해야 합니다.
 
@@ -199,7 +201,7 @@ make packages
 릴리스할 때 `VERSION` 값을 올리고 동일한 버전의 태그를 push합니다.
 
 ```bash
-git tag v0.4.4
+git tag v0.4.5
 git push origin main --tags
 ```
 
