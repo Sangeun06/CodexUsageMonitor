@@ -17,7 +17,7 @@ from urllib import error
 # does not automatically add the launched script's directory to sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from collector import DEFAULT_LOG_BACKUPS, DEFAULT_LOG_MAX_BYTES, append_log, attribute_sessions, attribution_scope, read_account, read_sessions, send
+from collector import DEFAULT_LOG_BACKUPS, DEFAULT_LOG_MAX_BYTES, append_log, attribution_scope, read_account, read_sessions, send, track_target_usage
 
 
 SKIP_PROFILES = {"all users", "default", "default user", "public", "defaultapppool", "wdagutilityaccount"}
@@ -90,8 +90,9 @@ def main() -> None:
         for profile in profiles:
             try:
                 payload = profile_snapshot(profile, token)
-                payload["sessions"] = attribute_sessions(
+                payload["sessions"] = track_target_usage(
                     payload["sessions"], payload["account"].get("key") or "unknown",
+                    args.account_key,
                     profile / ".codex" / "auth.json", state_file,
                     attribution_scope(payload["node"]["key"], token),
                 )

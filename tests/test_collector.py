@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from collector import append_log, attribute_sessions, read_sessions, snapshot
+from collector import append_log, read_sessions, snapshot, track_target_usage
 from collector_windows_machine import discover_profiles, profile_snapshot
 
 
@@ -20,23 +20,61 @@ class CollectorTest(unittest.TestCase):
             self.assertEqual(log.with_name("collector.log.1").read_text(), "second-line\n")
             self.assertEqual(log.with_name("collector.log.2").read_text(), "first-line\n")
 
-    def test_session_attribution_survives_account_switches(self):
+    def test_target_usage_accumulates_only_during_target_login(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             auth = root / "auth.json"
             state = root / "collector-state.json"
             auth.write_text("{}")
             os.utime(auth, (100, 100))
-            old = {"key": "old", "created_at": 80}
-            shared = {"key": "shared", "created_at": 110}
-            other = {"key": "other", "created_at": 120}
+            old = {"key": "old", "created_at": 80, "updated_at": 80, "tokens": 50}
+            shared = {"key": "shared", "created_at": 110, "updated_at": 110, "tokens": 100}
 
-            first = attribute_sessions([old, shared], "account-a", auth, state, "node")
-            self.assertEqual([item["key"] for item in first], ["shared"])
-            second = attribute_sessions([old, shared, other], "account-b", auth, state, "node")
-            self.assertEqual([item["key"] for item in second], ["other"])
-            switched_back = attribute_sessions([old, shared, other], "account-a", auth, state, "node")
-            self.assertEqual([item["key"] for item in switched_back], ["shared"])
+            first = track_target_usage([old, shared], "account-a", "account-a", auth, state, "node")
+            self.assertEqual([(item["key"], item["tokens"]) for item in first], [("shared", 100)])
+
+            # Usage immediately before switching away is credited to the
+            # previous target login, even if the next poll sees account-b.
+            shared.update(tokens=120, updated_at=190)
+            os.utime(auth, (200, 200))
+            after_switch = track_target_usage(
+                [old, shared], "account-b", "account-a", auth, state, "node"
+            )
+            self.assertEqual([(item["key"], item["tokens"]) for item in after_switch], [("shared", 120)])
+
+            shared.update(tokens=130, updated_at=210)
+            other = {"key": "other", "created_at": 210, "updated_at": 210, "tokens": 40}
+            while_other = track_target_usage(
+                [old, shared, other], "account-b", "account-a", auth, state, "node"
+            )
+            self.assertEqual([(item["key"], item["tokens"]) for item in while_other], [("shared", 120)])
+
+            os.utime(auth, (300, 300))
+            shared.update(tokens=160, updated_at=310)
+            other.update(tokens=60, updated_at=310)
+            switched_back = track_target_usage(
+                [old, shared, other], "account-a", "account-a", auth, state, "node"
+            )
+            self.assertEqual(
+                [(item["key"], item["tokens"]) for item in switched_back],
+                [("shared", 150), ("other", 20)],
+            )
+
+    def test_v043_account_binding_migrates_to_target_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth = root / "auth.json"
+            state = root / "collector-state.json"
+            auth.write_text("{}")
+            state.write_text(json.dumps({
+                "version": 1,
+                "profiles": {"node": {"sessions": {"session": "account-a"}}},
+            }))
+            result = track_target_usage(
+                [{"key": "session", "created_at": 1, "tokens": 75}],
+                "account-a", "account-a", auth, state, "node",
+            )
+            self.assertEqual(result[0]["tokens"], 75)
 
     def test_machine_collector_supports_embedded_python_imports(self):
         source = (Path(__file__).resolve().parents[1] / "collector_windows_machine.py").read_text()

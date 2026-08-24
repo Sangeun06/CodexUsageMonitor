@@ -21,7 +21,6 @@ from urllib import error, request
 
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_LOG_BACKUPS = 3
-UNCLAIMED_ACCOUNT = "unclaimed"
 
 
 def decode_jwt(token: str) -> dict[str, Any]:
@@ -90,45 +89,70 @@ def read_sessions(state_db: Path, token: str) -> list[dict[str, Any]]:
     ]
 
 
-def attribute_sessions(
+def track_target_usage(
     sessions: list[dict[str, Any]],
-    account_key: str,
+    current_account_key: str,
+    target_account_key: str,
     auth_file: Path,
     state_file: Path,
     scope_key: str,
 ) -> list[dict[str, Any]]:
-    """Persist an anonymous session-to-account binding and return this account's sessions."""
+    """Accumulate token growth observed while the target account is logged in."""
     try:
         state = json.loads(state_file.read_text())
         if not isinstance(state, dict) or not isinstance(state.get("profiles"), dict):
             raise ValueError("invalid attribution state")
     except FileNotFoundError:
-        state = {"version": 1, "profiles": {}}
+        state = {"version": 2, "profiles": {}}
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"could not read collector attribution state: {exc}") from exc
 
     profiles = state["profiles"]
     first_scan = scope_key not in profiles
     profile_state = profiles.setdefault(scope_key, {"sessions": {}})
-    assignments = profile_state.get("sessions")
-    if not isinstance(assignments, dict):
-        raise RuntimeError("invalid collector attribution profile")
+    records = profile_state.get("sessions")
+    if not isinstance(records, dict):
+        raise RuntimeError("invalid collector usage profile")
 
     try:
-        login_started_at = int(auth_file.stat().st_mtime) - 5
+        login_transition_at = int(auth_file.stat().st_mtime)
     except OSError:
-        login_started_at = int(time.time())
+        login_transition_at = int(time.time())
+    previous_account_key = profile_state.get("last_account_key")
+    account_changed = bool(previous_account_key and previous_account_key != current_account_key)
 
     for session in sessions:
         session_key = str(session["key"])
-        if session_key not in assignments:
-            # On the first scan, do not claim history older than the latest
-            # login. It may belong to another account from before installation.
-            assignments[session_key] = (
-                account_key
-                if not first_scan or int(session["created_at"]) >= login_started_at
-                else UNCLAIMED_ACCOUNT
+        current_tokens = max(0, int(session.get("tokens") or 0))
+        record = records.get(session_key)
+        if isinstance(record, str):
+            # Migrate the v0.4.3 first-account binding conservatively.
+            record = {
+                "last_tokens": current_tokens,
+                "target_tokens": current_tokens if record == target_account_key else 0,
+            }
+        elif isinstance(record, dict):
+            previous_tokens = max(0, int(record.get("last_tokens") or 0))
+            target_tokens = max(0, int(record.get("target_tokens") or 0))
+            delta_account_key = current_account_key
+            if account_changed and int(session.get("updated_at") or 0) <= login_transition_at + 5:
+                delta_account_key = str(previous_account_key)
+            if current_tokens >= previous_tokens and delta_account_key == target_account_key:
+                target_tokens += current_tokens - previous_tokens
+            record = {"last_tokens": current_tokens, "target_tokens": target_tokens}
+        else:
+            can_claim_initial = (
+                current_account_key == target_account_key
+                and (not first_scan or int(session["created_at"]) >= login_transition_at - 5)
             )
+            record = {
+                "last_tokens": current_tokens,
+                "target_tokens": current_tokens if can_claim_initial else 0,
+            }
+        records[session_key] = record
+
+    state["version"] = 2
+    profile_state["last_account_key"] = current_account_key
 
     state_file.parent.mkdir(parents=True, exist_ok=True)
     temporary = state_file.with_name(state_file.name + ".tmp")
@@ -139,7 +163,15 @@ def attribute_sessions(
     except OSError as exc:
         raise RuntimeError(f"could not save collector attribution state: {exc}") from exc
 
-    return [session for session in sessions if assignments.get(str(session["key"])) == account_key]
+    tracked = []
+    for session in sessions:
+        target_tokens = int(records[str(session["key"])]["target_tokens"])
+        if target_tokens <= 0:
+            continue
+        attributed = dict(session)
+        attributed["tokens"] = target_tokens
+        tracked.append(attributed)
+    return tracked
 
 
 def append_log(path: Path, line: str, max_bytes: int, backup_count: int) -> None:
@@ -227,8 +259,9 @@ def main() -> None:
     while True:
         try:
             payload = snapshot(args.state_db, args.auth_file, token)
-            payload["sessions"] = attribute_sessions(
+            payload["sessions"] = track_target_usage(
                 payload["sessions"], payload["account"].get("key") or "unknown",
+                args.account_key or payload["account"].get("key") or "unknown",
                 args.auth_file, args.state_file, attribution_scope(payload["node"]["key"], token),
             )
             if args.account_key and payload["account"].get("key") != args.account_key:

@@ -104,7 +104,9 @@ python3 collector.py \
 
 배포 패키지에는 중앙 서버에서 현재 로그인한 공유 Codex 계정의 익명 계정 키가 포함됩니다. 각 수집기는 이 키와 일치하는 계정만 전송하며, 중앙 서버도 다른 계정의 수집 요청을 다시 거부합니다. 따라서 같은 PC에 다른 Codex 계정이 있어도 이 대시보드에는 등록되지 않습니다.
 
-수집기는 세션 본문이나 원본 ID 대신 익명 세션 키와 익명 계정 키의 최초 귀속만 로컬 `collector-state.json`에 기록합니다. Codex 로그인을 다른 계정으로 전환해도 기존 공유 계정 집계는 중앙 서버에 유지되며, 다른 계정에서 새로 만든 세션은 나중에 공유 계정으로 다시 로그인해도 공유 계정 사용량으로 전송되지 않습니다. 설치 전에 생성된 세션 중 마지막 로그인 시점보다 오래된 기록은 계정을 확정할 수 없어 안전하게 제외됩니다.
+수집기는 세션 본문이나 원본 ID 대신 세션별 마지막 토큰 수와 공유 계정에 귀속된 누적 토큰 수만 로컬 `collector-state.json`에 기록합니다. Codex 로그인을 다른 계정으로 전환해도 기존 공유 계정 집계는 중앙 서버에 유지됩니다. 매 수집 시점의 토큰 증가분은 그때 로그인된 계정에 귀속되므로, 다른 계정으로 사용한 구간은 제외되고 공유 계정으로 다시 로그인한 뒤 사용한 증가분은 같은 세션이라도 계속 누적됩니다.
+
+Codex 내부 DB에는 세션별 계정 ID가 없으므로 수집기 설치 전의 혼합 계정 이력을 완벽히 소급 분리할 수는 없습니다. 첫 수집 당시 마지막 로그인보다 오래된 기존 기록은 초기값에서 제외하고, 이후 30초 간격으로 관찰되는 증가량부터 정확히 구분합니다. 수집기가 정지된 동안 여러 차례 계정 전환과 사용이 발생하면 그 구간 역시 정확히 분리할 수 없습니다.
 
 ### Linux 단일 설치 패키지
 
@@ -117,14 +119,14 @@ make bundle
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.4.3-linux-user-provisioned.tar.gz
+dist/codex-usage-collector-0.4.4-linux-user-provisioned.tar.gz
 ```
 
 이 파일 하나를 대상 서버에 안전하게 전송한 뒤 해당 사용자로 설치합니다.
 
 ```bash
-tar -xzf codex-usage-collector-0.4.3-linux-user-provisioned.tar.gz
-cd codex-usage-collector-0.4.3
+tar -xzf codex-usage-collector-0.4.4-linux-user-provisioned.tar.gz
+cd codex-usage-collector-0.4.4
 sha256sum -c SHA256SUMS
 ./install.sh
 ```
@@ -142,7 +144,7 @@ make bundle-windows
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.4.3-windows-user-provisioned.zip
+dist/codex-usage-collector-0.4.4-windows-user-provisioned.zip
 ```
 
 대상 Windows PC에서 ZIP을 푼 후 `install.cmd`를 더블클릭합니다. 관리자 권한은 필요하지 않으며, 현재 Windows 사용자 이름으로 작업 스케줄러에 등록되어 로그인할 때 자동으로 실행됩니다. 제거할 때는 같은 폴더의 `uninstall.cmd`를 실행합니다.
@@ -152,7 +154,7 @@ Windows 설치 프로그램은 Python 3을 먼저 탐색하고, 없으면 `winge
 ### Windows 관리자 EXE 설치 — 권장
 
 ```text
-dist/codex-usage-collector-0.4.3-windows-machine-setup.exe
+dist/codex-usage-collector-0.4.4-windows-machine-setup.exe
 ```
 
 EXE를 실행하고 UAC 관리자 권한 요청을 승인하면 다음 작업이 모두 자동으로 이루어집니다.
@@ -186,7 +188,7 @@ make packages
 
 ## 비공개 GitHub Release
 
-이 저장소는 `v0.4.3`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
+이 저장소는 `v0.4.4`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
 
 저장소 설정에 다음 값을 등록해야 합니다.
 
@@ -197,7 +199,7 @@ make packages
 릴리스할 때 `VERSION` 값을 올리고 동일한 버전의 태그를 push합니다.
 
 ```bash
-git tag v0.4.3
+git tag v0.4.4
 git push origin main --tags
 ```
 
