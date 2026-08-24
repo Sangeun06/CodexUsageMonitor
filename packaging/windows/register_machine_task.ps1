@@ -13,6 +13,9 @@ $PythonExecutable = Join-Path $InstallDir "runtime\pythonw.exe"
 $Collector = Join-Path $InstallDir "collector_windows_machine.py"
 $TokenFile = Join-Path $DataDir "collector.token"
 $LogFile = Join-Path $DataDir "collector.log"
+$StateFile = Join-Path $DataDir "collector-state.json"
+$LogMaxBytes = if ($Configuration.PSObject.Properties.Name -contains "LogMaxBytes") { [int]$Configuration.LogMaxBytes } else { 5242880 }
+$LogBackups = if ($Configuration.PSObject.Properties.Name -contains "LogBackups") { [int]$Configuration.LogBackups } else { 3 }
 
 if (-not (Test-Path -LiteralPath $PythonExecutable -PathType Leaf)) {
     throw "Bundled Python runtime was not found."
@@ -36,8 +39,11 @@ $CollectorArguments = @(
     "--server", $Server,
     "--token-file", $TokenFile,
     "--account-key", $AccountKey,
+    "--state-file", $StateFile,
     "--interval", "30",
-    "--log-file", $LogFile
+    "--log-file", $LogFile,
+    "--log-max-bytes", ([string]$LogMaxBytes),
+    "--log-backups", ([string]$LogBackups)
 )
 $ArgumentLine = ($CollectorArguments | ForEach-Object { Quote-TaskArgument $_ }) -join " "
 $Action = New-ScheduledTaskAction -Execute $PythonExecutable -Argument $ArgumentLine -WorkingDirectory $InstallDir

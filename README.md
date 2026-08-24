@@ -104,6 +104,8 @@ python3 collector.py \
 
 배포 패키지에는 중앙 서버에서 현재 로그인한 공유 Codex 계정의 익명 계정 키가 포함됩니다. 각 수집기는 이 키와 일치하는 계정만 전송하며, 중앙 서버도 다른 계정의 수집 요청을 다시 거부합니다. 따라서 같은 PC에 다른 Codex 계정이 있어도 이 대시보드에는 등록되지 않습니다.
 
+수집기는 세션 본문이나 원본 ID 대신 익명 세션 키와 익명 계정 키의 최초 귀속만 로컬 `collector-state.json`에 기록합니다. Codex 로그인을 다른 계정으로 전환해도 기존 공유 계정 집계는 중앙 서버에 유지되며, 다른 계정에서 새로 만든 세션은 나중에 공유 계정으로 다시 로그인해도 공유 계정 사용량으로 전송되지 않습니다. 설치 전에 생성된 세션 중 마지막 로그인 시점보다 오래된 기록은 계정을 확정할 수 없어 안전하게 제외됩니다.
+
 ### Linux 단일 설치 패키지
 
 중앙 서버에서 인증키가 포함된 사용자용 패키지를 생성합니다.
@@ -115,14 +117,14 @@ make bundle
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.4.2-linux-user-provisioned.tar.gz
+dist/codex-usage-collector-0.4.3-linux-user-provisioned.tar.gz
 ```
 
 이 파일 하나를 대상 서버에 안전하게 전송한 뒤 해당 사용자로 설치합니다.
 
 ```bash
-tar -xzf codex-usage-collector-0.4.2-linux-user-provisioned.tar.gz
-cd codex-usage-collector-0.4.2
+tar -xzf codex-usage-collector-0.4.3-linux-user-provisioned.tar.gz
+cd codex-usage-collector-0.4.3
 sha256sum -c SHA256SUMS
 ./install.sh
 ```
@@ -140,7 +142,7 @@ make bundle-windows
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.4.2-windows-user-provisioned.zip
+dist/codex-usage-collector-0.4.3-windows-user-provisioned.zip
 ```
 
 대상 Windows PC에서 ZIP을 푼 후 `install.cmd`를 더블클릭합니다. 관리자 권한은 필요하지 않으며, 현재 Windows 사용자 이름으로 작업 스케줄러에 등록되어 로그인할 때 자동으로 실행됩니다. 제거할 때는 같은 폴더의 `uninstall.cmd`를 실행합니다.
@@ -150,7 +152,7 @@ Windows 설치 프로그램은 Python 3을 먼저 탐색하고, 없으면 `winge
 ### Windows 관리자 EXE 설치 — 권장
 
 ```text
-dist/codex-usage-collector-0.4.2-windows-machine-setup.exe
+dist/codex-usage-collector-0.4.3-windows-machine-setup.exe
 ```
 
 EXE를 실행하고 UAC 관리자 권한 요청을 승인하면 다음 작업이 모두 자동으로 이루어집니다.
@@ -164,6 +166,16 @@ EXE를 실행하고 UAC 관리자 권한 요청을 승인하면 다음 작업이
 
 별도 Python 설치나 사용자별 수집기 설정은 필요하지 않습니다. 제거할 때는 Windows의 **설치된 앱**에서 `Codex Usage Collector`를 제거합니다.
 
+Windows 수집기 로그는 기본 5 MiB에서 회전하며 `collector.log.1`부터 최대 3개까지 보관합니다. 관리자 EXE 설치판은 다음 레지스트리 값을 바꾼 뒤 작업 등록 스크립트를 다시 실행해 조절할 수 있습니다.
+
+```powershell
+Set-ItemProperty "HKLM:\Software\CodexUsageCollector" -Name LogMaxBytes -Value 10485760
+Set-ItemProperty "HKLM:\Software\CodexUsageCollector" -Name LogBackups -Value 5
+& "$env:ProgramFiles\Codex Usage Collector\register_machine_task.ps1"
+```
+
+위 예시는 로그당 10 MiB, 백업 5개입니다. 사용자 ZIP 설치판은 `install.ps1 -LogMaxBytes 10485760 -LogBackups 5`처럼 지정할 수 있고, Linux에서는 `CODEX_COLLECTOR_LOG_MAX_BYTES`와 `CODEX_COLLECTOR_LOG_BACKUPS` 환경변수를 사용할 수 있습니다.
+
 현재 EXE는 코드 서명 인증서로 서명되지 않아 Windows에서 게시자를 `Unknown`으로 표시하거나 SmartScreen 경고를 낼 수 있습니다. 배포 전에 조직의 코드 서명 인증서로 서명하는 것을 권장합니다.
 
 Linux와 Windows의 provisioned 및 generic 패키지를 한 번에 생성하려면:
@@ -174,7 +186,7 @@ make packages
 
 ## 비공개 GitHub Release
 
-이 저장소는 `v0.4.2`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
+이 저장소는 `v0.4.3`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
 
 저장소 설정에 다음 값을 등록해야 합니다.
 
@@ -185,7 +197,7 @@ make packages
 릴리스할 때 `VERSION` 값을 올리고 동일한 버전의 태그를 push합니다.
 
 ```bash
-git tag v0.4.2
+git tag v0.4.3
 git push origin main --tags
 ```
 

@@ -75,6 +75,8 @@ Section "Machine-wide collector" SecMain
   WriteRegStr HKLM "Software\CodexUsageCollector" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\CodexUsageCollector" "Server" "${SERVER_URL}"
   WriteRegStr HKLM "Software\CodexUsageCollector" "AccountKey" "${TARGET_ACCOUNT_KEY}"
+  WriteRegDWORD HKLM "Software\CodexUsageCollector" "LogMaxBytes" 5242880
+  WriteRegDWORD HKLM "Software\CodexUsageCollector" "LogBackups" 3
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexUsageCollector" "DisplayName" "Codex Usage Collector"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexUsageCollector" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexUsageCollector" "Publisher" "Codex Usage Monitor"

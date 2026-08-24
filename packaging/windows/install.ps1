@@ -3,6 +3,8 @@ param(
     [string]$Server = "",
     [string]$TokenFile = "",
     [string]$AccountKey = "",
+    [int]$LogMaxBytes = 5242880,
+    [int]$LogBackups = 3,
     [switch]$NoStart
 )
 
@@ -70,6 +72,7 @@ $ConfigDir = Join-Path $env:APPDATA "CodexUsageCollector"
 $InstalledCollector = Join-Path $InstallDir "collector.py"
 $InstalledToken = Join-Path $ConfigDir "collector.token"
 $LogFile = Join-Path $ConfigDir "collector.log"
+$StateFile = Join-Path $ConfigDir "collector-state.json"
 $TaskName = "CodexUsageCollector-$($env:USERNAME)"
 $Identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
@@ -89,8 +92,11 @@ $CollectorArguments = @($PythonPrefix) + @(
     "--server", $Server,
     "--token-file", $InstalledToken,
     "--account-key", $AccountKey,
+    "--state-file", $StateFile,
     "--interval", "30",
-    "--log-file", $LogFile
+    "--log-file", $LogFile,
+    "--log-max-bytes", ([string]$LogMaxBytes),
+    "--log-backups", ([string]$LogBackups)
 )
 $ArgumentLine = ($CollectorArguments | ForEach-Object { Quote-TaskArgument $_ }) -join " "
 $Action = New-ScheduledTaskAction -Execute $PythonExecutable -Argument $ArgumentLine -WorkingDirectory $InstallDir

@@ -17,7 +17,7 @@ from urllib import error
 # does not automatically add the launched script's directory to sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from collector import read_account, read_sessions, send
+from collector import DEFAULT_LOG_BACKUPS, DEFAULT_LOG_MAX_BYTES, append_log, attribute_sessions, attribution_scope, read_account, read_sessions, send
 
 
 SKIP_PROFILES = {"all users", "default", "default user", "public", "defaultapppool", "wdagutilityaccount"}
@@ -30,7 +30,10 @@ def discover_profiles(root: Path) -> list[Path]:
     for candidate in root.iterdir():
         if not candidate.is_dir() or candidate.name.lower() in SKIP_PROFILES:
             continue
-        if (candidate / ".codex" / "state_5.sqlite").is_file():
+        codex_dir = candidate / ".codex"
+        # A fresh Codex login can create auth.json before the first session DB.
+        # Register the account node immediately; sessions will appear later.
+        if (codex_dir / "auth.json").is_file() or (codex_dir / "state_5.sqlite").is_file():
             profiles.append(candidate)
     return sorted(profiles, key=lambda item: item.name.lower())
 
@@ -38,6 +41,7 @@ def discover_profiles(root: Path) -> list[Path]:
 def profile_snapshot(profile: Path, token: str) -> dict:
     hostname, os_user = socket.gethostname(), profile.name
     codex_dir = profile / ".codex"
+    state_db = codex_dir / "state_5.sqlite"
     return {
         "version": 1,
         "node": {
@@ -46,7 +50,7 @@ def profile_snapshot(profile: Path, token: str) -> dict:
             "os_user": os_user,
         },
         "account": read_account(codex_dir / "auth.json", token),
-        "sessions": read_sessions(codex_dir / "state_5.sqlite", token),
+        "sessions": read_sessions(state_db, token) if state_db.is_file() else [],
     }
 
 
@@ -56,8 +60,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--profiles-root", type=Path, default=Path(os.environ.get("SystemDrive", "C:")) / "Users")
     parser.add_argument("--account-key", required=True, help="Only send this anonymized Codex account")
+    parser.add_argument("--state-file", type=Path)
     parser.add_argument("--interval", type=int, default=30)
     parser.add_argument("--log-file", type=Path)
+    parser.add_argument("--log-max-bytes", type=int, default=DEFAULT_LOG_MAX_BYTES)
+    parser.add_argument("--log-backups", type=int, default=DEFAULT_LOG_BACKUPS)
     parser.add_argument("--once", action="store_true")
     return parser.parse_args()
 
@@ -68,14 +75,14 @@ def main() -> None:
     if not token:
         raise SystemExit("collector token is empty")
 
+    state_file = args.state_file or args.token_file.with_name("collector-state.json")
+
     def log(message: str) -> None:
         line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}"
         if sys.stdout:
             print(line, flush=True)
         if args.log_file:
-            args.log_file.parent.mkdir(parents=True, exist_ok=True)
-            with args.log_file.open("a", encoding="utf-8") as stream:
-                stream.write(line + "\n")
+            append_log(args.log_file, line, max(0, args.log_max_bytes), max(0, args.log_backups))
 
     while True:
         profiles = discover_profiles(args.profiles_root)
@@ -83,6 +90,11 @@ def main() -> None:
         for profile in profiles:
             try:
                 payload = profile_snapshot(profile, token)
+                payload["sessions"] = attribute_sessions(
+                    payload["sessions"], payload["account"].get("key") or "unknown",
+                    profile / ".codex" / "auth.json", state_file,
+                    attribution_scope(payload["node"]["key"], token),
+                )
                 if payload["account"].get("key") != args.account_key:
                     log(f"profile={profile.name} skipped=unregistered-account")
                     continue

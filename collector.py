@@ -19,6 +19,11 @@ from typing import Any
 from urllib import error, request
 
 
+DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
+DEFAULT_LOG_BACKUPS = 3
+UNCLAIMED_ACCOUNT = "unclaimed"
+
+
 def decode_jwt(token: str) -> dict[str, Any]:
     try:
         part = token.split(".")[1]
@@ -30,6 +35,12 @@ def decode_jwt(token: str) -> dict[str, Any]:
 
 def digest(kind: str, value: str, token: str) -> str:
     return hashlib.sha256(f"{token}:{kind}:{value}".encode()).hexdigest()[:12]
+
+
+def attribution_scope(node_key: str, token: str) -> str:
+    # A collector-token rotation starts a fresh, conservative attribution
+    # baseline instead of claiming old sessions under the current account.
+    return hashlib.sha256(f"{token}:attribution:{node_key}".encode()).hexdigest()[:24]
 
 
 def read_account(auth_file: Path, token: str) -> dict[str, Any]:
@@ -79,6 +90,77 @@ def read_sessions(state_db: Path, token: str) -> list[dict[str, Any]]:
     ]
 
 
+def attribute_sessions(
+    sessions: list[dict[str, Any]],
+    account_key: str,
+    auth_file: Path,
+    state_file: Path,
+    scope_key: str,
+) -> list[dict[str, Any]]:
+    """Persist an anonymous session-to-account binding and return this account's sessions."""
+    try:
+        state = json.loads(state_file.read_text())
+        if not isinstance(state, dict) or not isinstance(state.get("profiles"), dict):
+            raise ValueError("invalid attribution state")
+    except FileNotFoundError:
+        state = {"version": 1, "profiles": {}}
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"could not read collector attribution state: {exc}") from exc
+
+    profiles = state["profiles"]
+    first_scan = scope_key not in profiles
+    profile_state = profiles.setdefault(scope_key, {"sessions": {}})
+    assignments = profile_state.get("sessions")
+    if not isinstance(assignments, dict):
+        raise RuntimeError("invalid collector attribution profile")
+
+    try:
+        login_started_at = int(auth_file.stat().st_mtime) - 5
+    except OSError:
+        login_started_at = int(time.time())
+
+    for session in sessions:
+        session_key = str(session["key"])
+        if session_key not in assignments:
+            # On the first scan, do not claim history older than the latest
+            # login. It may belong to another account from before installation.
+            assignments[session_key] = (
+                account_key
+                if not first_scan or int(session["created_at"]) >= login_started_at
+                else UNCLAIMED_ACCOUNT
+            )
+
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = state_file.with_name(state_file.name + ".tmp")
+    try:
+        temporary.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(state_file)
+    except OSError as exc:
+        raise RuntimeError(f"could not save collector attribution state: {exc}") from exc
+
+    return [session for session in sessions if assignments.get(str(session["key"])) == account_key]
+
+
+def append_log(path: Path, line: str, max_bytes: int, backup_count: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded_size = len((line + "\n").encode("utf-8"))
+    if max_bytes > 0 and path.is_file() and path.stat().st_size + encoded_size > max_bytes:
+        if backup_count <= 0:
+            path.unlink()
+        else:
+            oldest = path.with_name(f"{path.name}.{backup_count}")
+            if oldest.exists():
+                oldest.unlink()
+            for index in range(backup_count - 1, 0, -1):
+                source = path.with_name(f"{path.name}.{index}")
+                if source.exists():
+                    source.replace(path.with_name(f"{path.name}.{index + 1}"))
+            path.replace(path.with_name(f"{path.name}.1"))
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(line + "\n")
+
+
 def snapshot(state_db: Path, auth_file: Path, token: str) -> dict[str, Any]:
     hostname, os_user = socket.gethostname(), getpass.getuser()
     return {
@@ -89,7 +171,7 @@ def snapshot(state_db: Path, auth_file: Path, token: str) -> dict[str, Any]:
             "os_user": os_user,
         },
         "account": read_account(auth_file, token),
-        "sessions": read_sessions(state_db, token),
+        "sessions": read_sessions(state_db, token) if state_db.is_file() else [],
     }
 
 
@@ -120,8 +202,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-db", type=Path, default=Path("~/.codex/state_5.sqlite").expanduser())
     parser.add_argument("--auth-file", type=Path, default=Path("~/.codex/auth.json").expanduser())
     parser.add_argument("--account-key", default=os.getenv("CODEX_TARGET_ACCOUNT_KEY"), help="Only send this anonymized Codex account")
+    parser.add_argument("--state-file", type=Path, default=Path(os.getenv("CODEX_COLLECTOR_STATE_FILE", "~/.config/codex-usage-collector-state.json")).expanduser())
     parser.add_argument("--interval", type=int, default=int(os.getenv("CODEX_COLLECTOR_INTERVAL", "30")))
     parser.add_argument("--log-file", type=Path, help="Optional log file (useful for Windows scheduled tasks)")
+    parser.add_argument("--log-max-bytes", type=int, default=int(os.getenv("CODEX_COLLECTOR_LOG_MAX_BYTES", str(DEFAULT_LOG_MAX_BYTES))))
+    parser.add_argument("--log-backups", type=int, default=int(os.getenv("CODEX_COLLECTOR_LOG_BACKUPS", str(DEFAULT_LOG_BACKUPS))))
     parser.add_argument("--once", action="store_true")
     return parser.parse_args()
 
@@ -137,13 +222,15 @@ def main() -> None:
         if sys.stdout:
             print(line, flush=True)
         if args.log_file:
-            args.log_file.parent.mkdir(parents=True, exist_ok=True)
-            with args.log_file.open("a", encoding="utf-8") as stream:
-                stream.write(line + "\n")
+            append_log(args.log_file, line, max(0, args.log_max_bytes), max(0, args.log_backups))
 
     while True:
         try:
             payload = snapshot(args.state_db, args.auth_file, token)
+            payload["sessions"] = attribute_sessions(
+                payload["sessions"], payload["account"].get("key") or "unknown",
+                args.auth_file, args.state_file, attribution_scope(payload["node"]["key"], token),
+            )
             if args.account_key and payload["account"].get("key") != args.account_key:
                 log(f"skipped unregistered account on {payload['node']['hostname']}:{payload['node']['os_user']}")
             else:
