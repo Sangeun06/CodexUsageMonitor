@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Codex Usage Monitor</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark"><span></span><span></span><span></span></div>
+          <div>
+            <p class="eyebrow">LOCAL TELEMETRY</p>
+            <h1>Codex Usage</h1>
+          </div>
+        </div>
+        <div class="connection"><i></i><span id="connectionText">연결 중</span></div>
+      </header>
+
+      <section class="hero">
+        <div>
+          <p class="eyebrow">TOTAL PROCESSED</p>
+          <div class="token-total" id="totalTokens">—</div>
+          <p class="hero-copy">현재 서버에서 관측한 누적 토큰</p>
+        </div>
+        <div class="updated">
+          <span>마지막 스캔</span>
+          <strong id="lastUpdated">—</strong>
+        </div>
+      </section>
+
+      <section class="metric-grid" aria-label="요약 통계">
+        <article class="metric-card">
+          <span>세션</span><strong id="sessionCount">—</strong><small>보관 제외</small>
+        </article>
+        <article class="metric-card live-card">
+          <span>최근 활성</span><strong id="activeCount">—</strong><small>5분 이내</small>
+        </article>
+        <article class="metric-card">
+          <span>프로젝트</span><strong id="projectCount">—</strong><small>익명 집계</small>
+        </article>
+        <article class="metric-card">
+          <span>모델</span><strong id="modelCount">—</strong><small>사용 중</small>
+        </article>
+      </section>
+
+      <section class="panel account-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">CONNECTED ACCOUNTS</p><h2>수집 계정</h2></div>
+          <div class="legend"><i></i> 토큰 원문 제외</div>
+        </div>
+        <div class="account-grid" id="accountGrid"></div>
+      </section>
+
+      <section class="panel chart-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">LAST 24 HOURS</p><h2>사용량 추이</h2></div>
+          <div class="legend"><i></i> 전체 토큰</div>
+        </div>
+        <div class="chart-wrap">
+          <svg id="usageChart" viewBox="0 0 960 260" preserveAspectRatio="none" role="img" aria-label="24시간 토큰 사용량 추이">
+            <defs>
+              <linearGradient id="areaFill" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stop-color="#55e6a5" stop-opacity=".28" />
+                <stop offset="100%" stop-color="#55e6a5" stop-opacity="0" />
+              </linearGradient>
+            </defs>
+            <g id="gridLines"></g><path id="areaPath" class="area"></path><path id="linePath" class="line"></path>
+          </svg>
+          <div class="empty-chart" id="emptyChart">샘플을 수집하는 중입니다</div>
+        </div>
+      </section>
+
+      <section class="panel sessions-panel">
+        <div class="panel-heading session-heading">
+          <div><p class="eyebrow">ANONYMIZED SESSIONS</p><h2>세션별 사용량</h2></div>
+          <label class="search"><span>⌕</span><input id="searchInput" placeholder="모델 또는 세션 검색" /></label>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>상태</th><th>서버 / 사용자</th><th>세션</th><th>프로젝트</th><th>모델</th><th>토큰</th><th>최근 변화</th><th>마지막 활동</th><th><span class="sr-only">상세</span></th></tr></thead>
+            <tbody id="sessionRows"></tbody>
+          </table>
+          <div class="empty-table" id="emptyTable">표시할 세션이 없습니다.</div>
+        </div>
+      </section>
+
+      <footer>
+        <span>본문·제목·경로·원본 ID는 수집하지 않습니다.</span>
+        <span id="refreshLabel">자동 새로고침</span>
+      </footer>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,83 @@
+name: Private release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Refuse public repositories
+        if: ${{ !github.event.repository.private }}
+        run: |
+          echo "::error::Provisioned artifacts contain a collector credential. Releases are allowed only in private repositories."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Validate release configuration
+        env:
+          COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
+          TARGET_ACCOUNT_KEY: ${{ secrets.TARGET_ACCOUNT_KEY }}
+          MONITOR_SERVER_URL: ${{ vars.MONITOR_SERVER_URL }}
+        run: |
+          test -n "$COLLECTOR_TOKEN" || { echo "::error::COLLECTOR_TOKEN secret is required"; exit 1; }
+          test -n "$TARGET_ACCOUNT_KEY" || { echo "::error::TARGET_ACCOUNT_KEY secret is required"; exit 1; }
+          test -n "$MONITOR_SERVER_URL" || { echo "::error::MONITOR_SERVER_URL variable is required"; exit 1; }
+          test "${GITHUB_REF_NAME#v}" = "$(tr -d '\r\n' < VERSION)" || {
+            echo "::error::Tag version must match VERSION"; exit 1;
+          }
+
+      - name: Run tests
+        run: make test
+
+      - name: Install NSIS and download pinned Python runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes nsis
+          curl -fL --retry 3 \
+            https://www.python.org/ftp/python/3.13.13/python-3.13.13-embed-amd64.zip \
+            --output /tmp/python-3.13.13-embed-amd64.zip
+
+      - name: Build provisioned and generic packages
+        env:
+          COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
+          TARGET_ACCOUNT_KEY: ${{ secrets.TARGET_ACCOUNT_KEY }}
+          MONITOR_SERVER_URL: ${{ vars.MONITOR_SERVER_URL }}
+        run: |
+          install -m 600 /dev/null /tmp/collector.token
+          printf '%s' "$COLLECTOR_TOKEN" > /tmp/collector.token
+          python3 tools/build_collector_bundle.py \
+            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
+            --account-key "$TARGET_ACCOUNT_KEY"
+          python3 tools/build_collector_bundle.py \
+            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
+            --account-key "$TARGET_ACCOUNT_KEY" --without-token
+          python3 tools/build_windows_bundle.py \
+            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
+            --account-key "$TARGET_ACCOUNT_KEY"
+          python3 tools/build_windows_bundle.py \
+            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
+            --account-key "$TARGET_ACCOUNT_KEY" --without-token
+          python3 tools/build_windows_exe.py \
+            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
+            --account-key "$TARGET_ACCOUNT_KEY" \
+            --python-runtime /tmp/python-3.13.13-embed-amd64.zip \
+            --makensis /usr/bin/makensis --nsis-dir /usr/share/nsis
+          sha256sum dist/* > dist/SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag --generate-notes --title "Codex Usage Monitor $GITHUB_REF_NAME"
