@@ -50,6 +50,11 @@ class PackagingTest(unittest.TestCase):
         self.assertIn("advfirewall firewall add rule", script)
         self.assertIn("SetRegView 64", script)
 
+    def test_release_checks_live_repository_visibility(self):
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY" --jq .visibility', workflow)
+        self.assertNotIn("github.event.repository.private", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

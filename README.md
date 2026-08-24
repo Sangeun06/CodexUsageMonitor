@@ -115,14 +115,14 @@ make bundle
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.4.1-linux-user-provisioned.tar.gz
+dist/codex-usage-collector-0.4.2-linux-user-provisioned.tar.gz
 ```
 
 이 파일 하나를 대상 서버에 안전하게 전송한 뒤 해당 사용자로 설치합니다.
 
 ```bash
-tar -xzf codex-usage-collector-0.4.1-linux-user-provisioned.tar.gz
-cd codex-usage-collector-0.4.1
+tar -xzf codex-usage-collector-0.4.2-linux-user-provisioned.tar.gz
+cd codex-usage-collector-0.4.2
 sha256sum -c SHA256SUMS
 ./install.sh
 ```
@@ -140,7 +140,7 @@ make bundle-windows
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.4.1-windows-user-provisioned.zip
+dist/codex-usage-collector-0.4.2-windows-user-provisioned.zip
 ```
 
 대상 Windows PC에서 ZIP을 푼 후 `install.cmd`를 더블클릭합니다. 관리자 권한은 필요하지 않으며, 현재 Windows 사용자 이름으로 작업 스케줄러에 등록되어 로그인할 때 자동으로 실행됩니다. 제거할 때는 같은 폴더의 `uninstall.cmd`를 실행합니다.
@@ -150,7 +150,7 @@ Windows 설치 프로그램은 Python 3을 먼저 탐색하고, 없으면 `winge
 ### Windows 관리자 EXE 설치 — 권장
 
 ```text
-dist/codex-usage-collector-0.4.1-windows-machine-setup.exe
+dist/codex-usage-collector-0.4.2-windows-machine-setup.exe
 ```
 
 EXE를 실행하고 UAC 관리자 권한 요청을 승인하면 다음 작업이 모두 자동으로 이루어집니다.
@@ -174,7 +174,7 @@ make packages
 
 ## 비공개 GitHub Release
 
-이 저장소는 `v0.4.1`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
+이 저장소는 `v0.4.2`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
 
 저장소 설정에 다음 값을 등록해야 합니다.
 
@@ -185,7 +185,7 @@ make packages
 릴리스할 때 `VERSION` 값을 올리고 동일한 버전의 태그를 push합니다.
 
 ```bash
-git tag v0.4.1
+git tag v0.4.2
 git push origin main --tags
 ```
 

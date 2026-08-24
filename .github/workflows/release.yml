@@ -12,11 +12,16 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
-      - name: Refuse public repositories
-        if: ${{ !github.event.repository.private }}
+      - name: Verify current repository visibility
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::error::Provisioned artifacts contain a collector credential. Releases are allowed only in private repositories."
-          exit 1
+          visibility="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+          if [ "$visibility" != "private" ]; then
+            echo "::error::Provisioned artifacts contain a collector credential. Current repository visibility is '$visibility', not 'private'."
+            exit 1
+          fi
+          echo "Repository visibility verified: private"
 
       - uses: actions/checkout@v4
 
