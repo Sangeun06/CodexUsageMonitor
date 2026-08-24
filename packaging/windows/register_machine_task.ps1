@@ -14,6 +14,8 @@ $Collector = Join-Path $InstallDir "collector_windows_machine.py"
 $TokenFile = Join-Path $DataDir "collector.token"
 $LogFile = Join-Path $DataDir "collector.log"
 $StateFile = Join-Path $DataDir "collector-state.json"
+$ProfilesDirectoryValue = (Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList").ProfilesDirectory
+$ProfilesRoot = [Environment]::ExpandEnvironmentVariables([string]$ProfilesDirectoryValue)
 $LogMaxBytes = if ($Configuration.PSObject.Properties.Name -contains "LogMaxBytes") { [int]$Configuration.LogMaxBytes } else { 5242880 }
 $LogBackups = if ($Configuration.PSObject.Properties.Name -contains "LogBackups") { [int]$Configuration.LogBackups } else { 3 }
 
@@ -39,6 +41,7 @@ $CollectorArguments = @(
     "--server", $Server,
     "--token-file", $TokenFile,
     "--account-key", $AccountKey,
+    "--profiles-root", $ProfilesRoot,
     "--state-file", $StateFile,
     "--interval", "30",
     "--log-file", $LogFile,

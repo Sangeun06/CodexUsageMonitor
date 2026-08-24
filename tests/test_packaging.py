@@ -45,6 +45,8 @@ class PackagingTest(unittest.TestCase):
         self.assertIn("New-ScheduledTaskTrigger -AtStartup", task_script)
         self.assertIn("Register-ScheduledTask", task_script)
         self.assertIn("--account-key", task_script)
+        self.assertIn("--profiles-root", task_script)
+        self.assertIn("ProfilesDirectory", task_script)
         self.assertIn("--state-file", task_script)
         self.assertIn("--log-max-bytes", task_script)
         self.assertIn("--log-backups", task_script)

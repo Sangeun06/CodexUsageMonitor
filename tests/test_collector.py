@@ -4,12 +4,18 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from pathlib import PureWindowsPath
 
 from collector import append_log, read_sessions, snapshot, track_target_usage
-from collector_windows_machine import discover_profiles, profile_snapshot
+from collector_windows_machine import discover_profiles, profile_snapshot, profiles_root_for_drive
 
 
 class CollectorTest(unittest.TestCase):
+    def test_windows_profiles_root_is_an_absolute_drive_path(self):
+        root = PureWindowsPath(str(profiles_root_for_drive("C:")))
+        self.assertTrue(root.is_absolute())
+        self.assertEqual(root, PureWindowsPath("C:/Users"))
+
     def test_log_rotation_respects_size_and_backup_count(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "collector.log"

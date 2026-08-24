@@ -23,6 +23,11 @@ from collector import DEFAULT_LOG_BACKUPS, DEFAULT_LOG_MAX_BYTES, append_log, at
 SKIP_PROFILES = {"all users", "default", "default user", "public", "defaultapppool", "wdagutilityaccount"}
 
 
+def profiles_root_for_drive(system_drive: str) -> Path:
+    drive = (system_drive or "C:").rstrip("\\/")
+    return Path(drive + "\\Users")
+
+
 def discover_profiles(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
@@ -58,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", required=True)
     parser.add_argument("--token-file", type=Path, required=True)
-    parser.add_argument("--profiles-root", type=Path, default=Path(os.environ.get("SystemDrive", "C:")) / "Users")
+    parser.add_argument("--profiles-root", type=Path, default=profiles_root_for_drive(os.environ.get("SystemDrive", "C:")))
     parser.add_argument("--account-key", required=True, help="Only send this anonymized Codex account")
     parser.add_argument("--state-file", type=Path)
     parser.add_argument("--interval", type=int, default=30)
