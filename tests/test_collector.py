@@ -1,16 +1,126 @@
+import base64
+import hashlib
 import json
 import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from pathlib import PureWindowsPath
+from unittest.mock import patch
 
-from collector import append_log, read_sessions, snapshot, track_target_usage
+from collector import COLLECTOR_VERSION, append_log, apply_collector_update, normalize_app_server_snapshot, read_sessions, snapshot, track_target_usage
 from collector_windows_machine import discover_profiles, profile_snapshot, profiles_root_for_drive
 
 
 class CollectorTest(unittest.TestCase):
+    def test_verified_rollout_buckets_are_sent_only_after_continuous_target_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth = root / "auth.json"
+            state = root / "collector-state.json"
+            rollout = root / "rollout.jsonl"
+            auth.write_text("{}")
+            os.utime(auth, (800, 800))
+            rollout.write_text("")
+            session = {
+                "key": "session", "created_at": 900, "updated_at": 1070, "tokens": 100,
+                "_rollout_path": str(rollout),
+            }
+            with patch("collector.time.time", return_value=1000):
+                first = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertNotIn("usage_buckets", first[0])
+
+            rollout.write_text(json.dumps({
+                "type": "event_msg", "timestamp": "1970-01-01T00:17:00Z",
+                "payload": {"type": "token_count", "info": {
+                    "last_token_usage": {"total_tokens": 40},
+                }},
+            }) + "\n")
+            session["tokens"] = 140
+            with patch("collector.time.time", return_value=1120):
+                second = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertEqual(second[0]["usage_buckets"], [{"at": 1020, "tokens": 40}])
+
+    def test_current_minute_rollout_bucket_waits_for_account_continuity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth = root / "auth.json"
+            state = root / "collector-state.json"
+            rollout = root / "rollout.jsonl"
+            auth.write_text("{}")
+            rollout.write_text("")
+            session = {
+                "key": "session", "created_at": 900, "updated_at": 1040, "tokens": 100,
+                "_rollout_path": str(rollout),
+            }
+            with patch("collector.time.time", return_value=1000):
+                track_target_usage([session], "target", "target", auth, state, "node")
+
+            rollout.write_text(json.dumps({
+                "type": "event_msg", "timestamp": "1970-01-01T00:17:10Z",
+                "payload": {"type": "token_count", "info": {
+                    "last_token_usage": {"total_tokens": 25},
+                }},
+            }) + "\n")
+            session["tokens"] = 125
+            with patch("collector.time.time", return_value=1045):
+                pending = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertNotIn("usage_buckets", pending[0])
+
+            with patch("collector.time.time", return_value=1080):
+                confirmed = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertEqual(confirmed[0]["usage_buckets"], [{"at": 1020, "tokens": 25}])
+
+    def test_atomic_collector_update_checks_checksum_and_keeps_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "collector.py"
+            target.write_text("OLD = True\n")
+            content = b"NEW = True\n"
+            update = {
+                "version": "9.0.0",
+                "files": {"collector.py": {
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "content": base64.b64encode(content).decode(),
+                }},
+            }
+            self.assertTrue(apply_collector_update(update, root))
+            self.assertEqual(target.read_bytes(), content)
+            self.assertEqual((root / "collector.py.previous").read_text(), "OLD = True\n")
+            self.assertEqual(COLLECTOR_VERSION, "0.6.0")
+
+    def test_app_server_snapshot_keeps_only_aggregate_usage(self):
+        result = normalize_app_server_snapshot(
+            {"account": {"type": "chatgpt", "email": "shared@example.com", "planType": "pro"}},
+            {
+                "summary": {
+                    "lifetimeTokens": 1234, "peakDailyTokens": 300,
+                    "longestRunningTurnSec": 45, "currentStreakDays": 2,
+                    "longestStreakDays": 7, "private": "do-not-copy",
+                },
+                "dailyUsageBuckets": [
+                    {"startDate": "2026-08-24", "tokens": 50, "messages": "secret"},
+                    {"startDate": "not-a-date", "tokens": 999},
+                ],
+            },
+            {"rateLimits": {
+                "limitId": "codex", "primary": {
+                    "usedPercent": 25.5, "windowDurationMins": 300,
+                    "resetsAt": 2000, "credits": "private",
+                },
+            }},
+            observed_at=1000,
+        )
+        usage = result["usage"]
+        self.assertEqual(usage["summary"]["lifetime_tokens"], 1234)
+        self.assertEqual(usage["daily_usage"], [{"date": "2026-08-24", "tokens": 50}])
+        self.assertEqual(usage["rate_limits"][0]["primary"]["used_percent"], 25.5)
+        serialized = json.dumps(result)
+        for excluded in ("do-not-copy", "secret", "credits", "messages"):
+            self.assertNotIn(excluded, serialized)
+
     def test_windows_profiles_root_is_an_absolute_drive_path(self):
         root = PureWindowsPath(str(profiles_root_for_drive("C:")))
         self.assertTrue(root.is_absolute())
@@ -94,7 +204,7 @@ class CollectorTest(unittest.TestCase):
             state = root / "state.sqlite"
             auth = root / "auth.json"
             auth.write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {}}))
-            with sqlite3.connect(state) as db:
+            with closing(sqlite3.connect(state)) as db, db:
                 db.execute(
                     """CREATE TABLE threads (
                         id TEXT, cwd TEXT, model TEXT, tokens_used INTEGER,

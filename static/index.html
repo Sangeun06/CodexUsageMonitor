@@ -26,7 +26,7 @@
         <div>
           <p class="eyebrow">TOTAL PROCESSED</p>
           <div class="token-total" id="totalTokens">—</div>
-          <p class="hero-copy">현재 서버에서 관측한 누적 토큰</p>
+          <p class="hero-copy" id="totalSourceLabel">공유 계정의 전체 누적 토큰을 불러오는 중입니다</p>
         </div>
         <div class="updated">
           <span>마지막 스캔</span>
@@ -49,6 +49,36 @@
         </article>
       </section>
 
+      <section class="panel usage-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">ACCOUNT-WIDE USAGE</p><h2>공유 계정 사용량</h2></div>
+          <div class="legend" id="usageFreshness"><i></i> 수집 대기 중</div>
+        </div>
+        <div class="usage-grid">
+          <article><span>오늘</span><strong id="todayTokens">—</strong><small>일별 계정 사용량</small></article>
+          <article><span>최고 일일 사용량</span><strong id="peakDailyTokens">—</strong><small>관측된 최고치</small></article>
+          <article><span>현재 연속 사용</span><strong id="currentStreak">—</strong><small>일</small></article>
+          <article><span>프로젝트 귀속 합계</span><strong id="sessionTokens">—</strong><small>로컬 세션 기준</small></article>
+        </div>
+        <div class="rate-limit-grid" id="rateLimitGrid"></div>
+        <div class="usage-empty" id="usageEmpty">계정 전체 사용량을 수집하는 중입니다. 기존 프로젝트 집계는 계속 표시됩니다.</div>
+      </section>
+
+      <section class="panel reconciliation-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">COLLECTION COVERAGE</p><h2>계정 전체값과 세션 귀속 대조</h2></div>
+          <div class="legend" id="coverageLegend"><i></i> 관측 기준 계산 중</div>
+        </div>
+        <div class="reconciliation-grid">
+          <article><span>계정 누적</span><strong id="reconAccountTotal">—</strong><small>app-server 전체값</small></article>
+          <article><span>세션 귀속 누적</span><strong id="reconSessionTotal">—</strong><small>모든 수집 노드</small></article>
+          <article><span>누적 미귀속 차이</span><strong id="reconLifetimeGap">—</strong><small>설치 전 이력 포함</small></article>
+          <article><span>현재 관측 구간 차이</span><strong id="reconPeriodGap">—</strong><small id="reconPeriodRange">관측 시작 대기</small></article>
+        </div>
+        <div class="coverage-track"><i id="coverageBar"></i></div>
+        <div class="coverage-reasons" id="coverageReasons"></div>
+      </section>
+
       <section class="panel account-panel">
         <div class="panel-heading">
           <div><p class="eyebrow">CONNECTED ACCOUNTS</p><h2>수집 계정</h2></div>
@@ -59,21 +89,37 @@
 
       <section class="panel chart-panel">
         <div class="panel-heading">
-          <div><p class="eyebrow">LAST 24 HOURS</p><h2>사용량 추이</h2></div>
-          <div class="legend"><i></i> 전체 토큰</div>
+          <div><p class="eyebrow">CURRENT WEEKLY WINDOW</p><h2>주간 사용량 추이</h2></div>
+          <div class="legend" id="chartLegend"><i></i> 현재 주기</div>
         </div>
         <div class="chart-wrap">
-          <svg id="usageChart" viewBox="0 0 960 260" preserveAspectRatio="none" role="img" aria-label="24시간 토큰 사용량 추이">
+          <svg id="usageChart" viewBox="0 0 960 260" preserveAspectRatio="none" role="img" aria-label="현재 주간 한도 사용률 추이">
             <defs>
               <linearGradient id="areaFill" x1="0" x2="0" y1="0" y2="1">
                 <stop offset="0%" stop-color="#55e6a5" stop-opacity=".28" />
                 <stop offset="100%" stop-color="#55e6a5" stop-opacity="0" />
               </linearGradient>
             </defs>
-            <g id="gridLines"></g><path id="areaPath" class="area"></path><path id="linePath" class="line"></path>
+            <g id="gridLines"></g><path id="areaPath" class="area"></path><path id="plannedPath" class="planned-line"></path><path id="linePath" class="line"></path>
           </svg>
           <div class="empty-chart" id="emptyChart">샘플을 수집하는 중입니다</div>
         </div>
+        <div class="pace-grid">
+          <article><span>현재 판정</span><strong id="paceStatus">—</strong><small id="paceDeviation">권장선 계산 중</small></article>
+          <article><span>하루 기본 권장량</span><strong id="dailyBudget">—</strong><small>주간 한도 ÷ 7일</small></article>
+          <article><span>남은 기간 일일 권장량</span><strong id="remainingDailyBudget">—</strong><small>현재 잔여량 기준</small></article>
+          <article><span>초기화 시 예상</span><strong id="projectedUsage">—</strong><small id="projectedDetail">현재 속도 기준</small></article>
+        </div>
+        <p class="alert-policy">권장 속도의 150%를 초과하면 확인된 주간 사용량이 가장 많은 수집 노드에 알림을 보냅니다.</p>
+      </section>
+
+      <section class="panel comparison-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">COLLECTOR COMPARISON</p><h2>수집 사용자별 주간 사용량 비교</h2></div>
+          <div class="legend"><i></i> 현재 주간 창 · 세션 귀속 기준</div>
+        </div>
+        <div class="comparison-list" id="comparisonList"></div>
+        <div class="usage-empty" id="comparisonEmpty">비교에 필요한 관측 샘플을 수집하는 중입니다.</div>
       </section>
 
       <section class="panel sessions-panel">

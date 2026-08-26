@@ -75,6 +75,7 @@ def main() -> None:
             "account_key": account_key,
             "token_included": not args.without_token,
             "install_scope": "current-user",
+            "requires": "Python 3 and a local Codex installation",
         }
         (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         checksums = []

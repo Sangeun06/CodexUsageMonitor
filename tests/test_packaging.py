@@ -9,6 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PackagingTest(unittest.TestCase):
+    def test_version_file_matches_collector_protocol_version(self):
+        from collector import COLLECTOR_VERSION
+        self.assertEqual((ROOT / "VERSION").read_text().strip(), COLLECTOR_VERSION)
+
     def test_release_builder_accepts_an_explicit_account_key(self):
         with TemporaryDirectory() as directory:
             missing_token = Path(directory) / "missing-token"

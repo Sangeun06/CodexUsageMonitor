@@ -8,6 +8,7 @@ import hashlib
 import os
 import socket
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,7 +18,7 @@ from urllib import error
 # does not automatically add the launched script's directory to sys.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from collector import DEFAULT_LOG_BACKUPS, DEFAULT_LOG_MAX_BYTES, append_log, attribution_scope, read_account, read_sessions, send, track_target_usage
+from collector import COLLECTOR_VERSION, CollectorRestart, DEFAULT_LOG_BACKUPS, DEFAULT_LOG_MAX_BYTES, append_log, attach_account_usage, attribution_scope, process_server_response, read_account, read_alert_receipts, read_sessions, send, track_target_usage
 
 
 SKIP_PROFILES = {"all users", "default", "default user", "public", "defaultapppool", "wdagutilityaccount"}
@@ -43,19 +44,23 @@ def discover_profiles(root: Path) -> list[Path]:
     return sorted(profiles, key=lambda item: item.name.lower())
 
 
-def profile_snapshot(profile: Path, token: str) -> dict:
+def profile_snapshot(profile: Path, token: str, include_rollout_path: bool = False) -> dict:
     hostname, os_user = socket.gethostname(), profile.name
     codex_dir = profile / ".codex"
     state_db = codex_dir / "state_5.sqlite"
     return {
         "version": 1,
+        "collector": {"version": COLLECTOR_VERSION, "kind": "windows-machine"},
         "node": {
             "key": hashlib.sha256(f"{hostname}:{os_user}".encode()).hexdigest()[:12],
             "hostname": hostname,
             "os_user": os_user,
         },
         "account": read_account(codex_dir / "auth.json", token),
-        "sessions": read_sessions(state_db, token) if state_db.is_file() else [],
+        "sessions": (
+            read_sessions(state_db, token, include_rollout_path=include_rollout_path)
+            if state_db.is_file() else []
+        ),
     }
 
 
@@ -94,7 +99,8 @@ def main() -> None:
         sent, failures = 0, 0
         for profile in profiles:
             try:
-                payload = profile_snapshot(profile, token)
+                payload = profile_snapshot(profile, token, include_rollout_path=True)
+                payload["alert_receipts"] = read_alert_receipts(state_file)
                 payload["sessions"] = track_target_usage(
                     payload["sessions"], payload["account"].get("key") or "unknown",
                     args.account_key,
@@ -104,8 +110,21 @@ def main() -> None:
                 if payload["account"].get("key") != args.account_key:
                     log(f"profile={profile.name} skipped=unregistered-account")
                     continue
-                send(args.server, payload, token)
+                usage_source = "local-fallback"
+                try:
+                    attach_account_usage(payload, profile / ".codex")
+                    usage_source = "codex-app-server"
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    log(f"profile={profile.name} account-usage-fallback={exc}")
+                response = send(args.server, payload, token)
+                log(f"profile={profile.name} sent source={usage_source}")
                 sent += 1
+                process_server_response(
+                    response, state_file, log, windows_user=profile.name,
+                    script_dir=Path(__file__).resolve().parent,
+                )
+            except CollectorRestart:
+                os.execv(sys.executable, [sys.executable, *sys.argv])
             except (OSError, sqlite3.Error, error.URLError, RuntimeError) as exc:
                 failures += 1
                 log(f"profile={profile.name} error={exc}")
