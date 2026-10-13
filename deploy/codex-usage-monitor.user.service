@@ -1,12 +1,14 @@
 [Unit]
 Description=Codex Usage Monitor
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 WorkingDirectory=/home/sangeun/workspace/CodexUsageMonitor
 ExecStart=/usr/bin/python3 /home/sangeun/workspace/CodexUsageMonitor/server.py --host 0.0.0.0 --port 8765
-Restart=on-failure
+Environment=PYTHONUNBUFFERED=1
+Restart=always
 RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true

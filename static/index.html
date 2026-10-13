@@ -1,95 +1,27 @@
 <!doctype html>
-<html lang="ko">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
-    <title>Codex Usage Monitor</title>
-    <link rel="stylesheet" href="/styles.css" />
-  </head>
-  <body>
-    <div class="ambient ambient-one"></div>
-    <div class="ambient ambient-two"></div>
-    <main class="shell">
-      <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark"><span></span><span></span><span></span></div>
-          <div>
-            <p class="eyebrow">LOCAL TELEMETRY</p>
-            <h1>Codex Usage</h1>
+<html lang="ko"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark" /><title>Codex Usage · 사용량 분석</title><link rel="stylesheet" href="/styles.css?v=20261008-1" /></head>
+<body><main class="shell">
+<header class="topbar"><div class="brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><p class="eyebrow">USAGE ANALYTICS</p><h1>Codex Usage</h1></div></div><div class="header-status"><div class="connection"><i></i><span id="connectionText">연결 중</span></div><span>업데이트 <strong id="lastUpdated">—</strong></span></div></header>
+<div class="dashboard-intro"><div><h2>누가, 언제, 얼마나 사용했나요?</h2><p>사용 기간과 집계 기준을 분리해 확인하세요. 모든 날짜별 분석은 UTC 기준입니다.</p></div><button id="manualRefresh" class="quiet-button">새로고침 ↻</button></div>
+<nav class="view-tabs" role="tablist" aria-label="사용량 분석 범위"><button id="tab-weekly" role="tab" aria-selected="true" aria-controls="view-weekly" data-view="weekly">주간 사용량</button><button id="tab-monthly" role="tab" aria-selected="false" tabindex="-1" aria-controls="view-monthly" data-view="monthly">월별 사용량</button><button id="tab-lifetime" role="tab" aria-selected="false" tabindex="-1" aria-controls="view-lifetime" data-view="lifetime">전체 누적</button><button id="tab-operations" role="tab" aria-selected="false" tabindex="-1" aria-controls="view-operations" data-view="operations">수집 상태 · 세션</button></nav>
+<section id="view-weekly" role="tabpanel" aria-labelledby="tab-weekly">
+<div class="scope-heading"><div><h2>현재 주간 주기</h2><p id="weeklyScope">계정 초기화 시각 기준 · 달력의 월–일과 다를 수 있습니다.</p></div><span class="scope-badge">주간 · WEEK</span></div>
+        <div class="period-metrics">
+            <article><span>계정 최소 주간량</span><strong id="weeklyAccountTokens">—</strong></article>
+            <article><span>사용 인원</span><strong id="weeklyParticipantCount">—</strong></article>
+            <article><span>주간 사용자 확인량</span><strong id="weeklyTrackedTokens">—</strong></article>
+            <article><span>미추적량</span><strong id="weeklyUntrackedTokens">—</strong></article>
           </div>
-        </div>
-        <div class="connection"><i></i><span id="connectionText">연결 중</span></div>
-      </header>
-
-      <section class="hero">
-        <div>
-          <p class="eyebrow">TOTAL PROCESSED</p>
-          <div class="token-total" id="totalTokens">—</div>
-          <p class="hero-copy" id="totalSourceLabel">공유 계정의 전체 누적 토큰을 불러오는 중입니다</p>
-        </div>
-        <div class="updated">
-          <span>마지막 스캔</span>
-          <strong id="lastUpdated">—</strong>
-        </div>
-      </section>
-
-      <section class="metric-grid" aria-label="요약 통계">
-        <article class="metric-card">
-          <span>세션</span><strong id="sessionCount">—</strong><small>보관 제외</small>
-        </article>
-        <article class="metric-card live-card">
-          <span>최근 활성</span><strong id="activeCount">—</strong><small>5분 이내</small>
-        </article>
-        <article class="metric-card">
-          <span>프로젝트</span><strong id="projectCount">—</strong><small>익명 집계</small>
-        </article>
-        <article class="metric-card">
-          <span>모델</span><strong id="modelCount">—</strong><small>사용 중</small>
-        </article>
-      </section>
-
-      <section class="panel usage-panel">
+<section class="panel explorer-panel" aria-labelledby="weeklyTitle">
+  <div class="panel-heading"><div><p class="eyebrow">USER BREAKDOWN · UTC</p><h2 id="weeklyTitle">주간 사용량 추이</h2></div><span class="legend">단위: 토큰</span></div>
+  <div class="explorer-toolbar"><span id="weeklyRange"></span><label>날짜 구분 <select id="weeklyDayFilter"><option value="all">전체</option><option value="weekday">주중</option><option value="weekend">주말</option></select></label></div>
+  <div class="explorer-layout"><div class="explorer-main"><div class="interactive-chart"><svg id="weeklyDailyChart" viewBox="0 0 900 300" role="group" aria-label="날짜별 사용자 사용량. 방향키로 날짜 이동, Enter로 선택"></svg><div id="weeklyTooltip" class="chart-tooltip" role="tooltip" hidden></div></div><div id="weeklyLegend" class="chart-legend"></div><p class="chart-help">날짜에 마우스를 올리거나 클릭하세요. Tab·방향키로도 이동할 수 있습니다. 점선은 기록 없음이며 0을 뜻하지 않습니다.</p></div>
+  <aside class="day-inspector" aria-label="선택한 날짜의 사용자별 사용량"><div class="inspector-heading"><div><span class="eyebrow">선택한 범위</span><h3 id="weeklySelectedDate">—</h3></div><label><span class="sr-only">주간 전체 또는 날짜 선택</span><select id="weeklyDateSelect"></select></label></div><div id="weeklyDonut" class="donut-wrap"></div><p id="weeklyDayNote" class="data-note"></p><div class="day-table-wrap"><table class="day-table"><thead><tr><th>사용자 / 서버</th><th>토큰</th><th>비중</th></tr></thead><tbody id="weeklyDayRows"></tbody></table></div></aside></div>
+  <p id="weeklyCoverageNote" class="data-note panel-note"></p>
+</section>
+<section class="panel chart-panel">
         <div class="panel-heading">
-          <div><p class="eyebrow">ACCOUNT-WIDE USAGE</p><h2>공유 계정 사용량</h2></div>
-          <div class="legend" id="usageFreshness"><i></i> 수집 대기 중</div>
-        </div>
-        <div class="usage-grid">
-          <article><span>오늘</span><strong id="todayTokens">—</strong><small>일별 계정 사용량</small></article>
-          <article><span>최고 일일 사용량</span><strong id="peakDailyTokens">—</strong><small>관측된 최고치</small></article>
-          <article><span>현재 연속 사용</span><strong id="currentStreak">—</strong><small>일</small></article>
-          <article><span>프로젝트 귀속 합계</span><strong id="sessionTokens">—</strong><small>로컬 세션 기준</small></article>
-        </div>
-        <div class="rate-limit-grid" id="rateLimitGrid"></div>
-        <div class="usage-empty" id="usageEmpty">계정 전체 사용량을 수집하는 중입니다. 기존 프로젝트 집계는 계속 표시됩니다.</div>
-      </section>
-
-      <section class="panel reconciliation-panel">
-        <div class="panel-heading">
-          <div><p class="eyebrow">COLLECTION COVERAGE</p><h2>계정 전체값과 세션 귀속 대조</h2></div>
-          <div class="legend" id="coverageLegend"><i></i> 관측 기준 계산 중</div>
-        </div>
-        <div class="reconciliation-grid">
-          <article><span>계정 누적</span><strong id="reconAccountTotal">—</strong><small>app-server 전체값</small></article>
-          <article><span>세션 귀속 누적</span><strong id="reconSessionTotal">—</strong><small>모든 수집 노드</small></article>
-          <article><span>누적 미귀속 차이</span><strong id="reconLifetimeGap">—</strong><small>설치 전 이력 포함</small></article>
-          <article><span>현재 관측 구간 차이</span><strong id="reconPeriodGap">—</strong><small id="reconPeriodRange">관측 시작 대기</small></article>
-        </div>
-        <div class="coverage-track"><i id="coverageBar"></i></div>
-        <div class="coverage-reasons" id="coverageReasons"></div>
-      </section>
-
-      <section class="panel account-panel">
-        <div class="panel-heading">
-          <div><p class="eyebrow">CONNECTED ACCOUNTS</p><h2>수집 계정</h2></div>
-          <div class="legend"><i></i> 토큰 원문 제외</div>
-        </div>
-        <div class="account-grid" id="accountGrid"></div>
-      </section>
-
-      <section class="panel chart-panel">
-        <div class="panel-heading">
-          <div><p class="eyebrow">CURRENT WEEKLY WINDOW</p><h2>주간 사용량 추이</h2></div>
+          <div><p class="eyebrow">CURRENT WEEKLY WINDOW</p><h2>계정 한도와 주간 구성</h2></div>
           <div class="legend" id="chartLegend"><i></i> 현재 주기</div>
         </div>
         <div class="chart-wrap">
@@ -103,6 +35,18 @@
             <g id="gridLines"></g><path id="areaPath" class="area"></path><path id="plannedPath" class="planned-line"></path><path id="linePath" class="line"></path>
           </svg>
           <div class="empty-chart" id="emptyChart">샘플을 수집하는 중입니다</div>
+          <div id="limitTooltip" class="chart-tooltip" role="tooltip" hidden></div>
+        </div>
+        <div class="weekly-breakdown">
+          <div class="weekly-breakdown-heading">
+            <div><h3>사용자별 주간 사용 비중</h3><p id="weeklyBreakdownRange">현재 주기 관측값을 확인하는 중입니다.</p></div>
+            <span>계정 주간 집계량 = 100% · 미추적 포함</span>
+          </div>
+
+          <div class="weekly-stack" id="weeklyBreakdownStack" role="img" aria-label="사용자별 주간 사용 비중과 미추적 비중"></div>
+          <div class="weekly-breakdown-legend" id="weeklyBreakdownLegend"></div>
+          <p class="weekly-breakdown-note" id="weeklyBreakdownNote"></p>
+          <div class="usage-empty" id="weeklyBreakdownEmpty">주간 한도와 계정 집계 정보를 기다리는 중입니다.</div>
         </div>
         <div class="pace-grid">
           <article><span>현재 판정</span><strong id="paceStatus">—</strong><small id="paceDeviation">권장선 계산 중</small></article>
@@ -112,35 +56,103 @@
         </div>
         <p class="alert-policy">권장 속도의 150%를 초과하면 확인된 주간 사용량이 가장 많은 수집 노드에 알림을 보냅니다.</p>
       </section>
-
-      <section class="panel comparison-panel">
+<section class="panel comparison-panel">
         <div class="panel-heading">
-          <div><p class="eyebrow">COLLECTOR COMPARISON</p><h2>수집 사용자별 주간 사용량 비교</h2></div>
-          <div class="legend"><i></i> 현재 주간 창 · 세션 귀속 기준</div>
+          <div><p class="eyebrow">COLLECTOR COMPARISON</p><h2>사용자별 주간 사용 비중 비교</h2></div>
+          <div class="legend"><i></i> 계정 주간 집계량 대비 % · 미추적 포함</div>
         </div>
         <div class="comparison-list" id="comparisonList"></div>
         <div class="usage-empty" id="comparisonEmpty">비교에 필요한 관측 샘플을 수집하는 중입니다.</div>
       </section>
+<section class="panel"><div class="panel-heading"><h2>계정 사용 한도</h2><div class="legend" id="usageFreshness"></div></div><div class="rate-limit-grid" id="rateLimitGrid"></div><div class="usage-empty" id="usageEmpty">계정 전체 사용량 수집 대기 중</div></section>
+</section>
+<section id="view-monthly" role="tabpanel" aria-labelledby="tab-monthly" hidden><div class="scope-heading"><div><h2>월별 사용량</h2><p>달력 월의 1일부터 말일까지 · UTC</p></div><label class="month-picker">조회 월 <select id="monthSelect" aria-label="조회 월"></select></label></div>
+<div class="period-metrics"><article><span>계정 월 사용량</span><strong id="monthlyTokens">—</strong><small id="monthlyCoverage">보고 날짜 확인 중</small></article><article><span>날짜별 사용자 확인량</span><strong id="monthlyTracked">—</strong><small>사용 날짜를 확인할 수 있는 양만</small></article><article><span>확인된 사용 인원</span><strong id="monthlyParticipants">—</strong><small>서버 · OS 사용자 조합</small></article><article id="monthlyTodayCard"><span>오늘 계정 사용량</span><strong id="todayTokens">—</strong><small>오늘 UTC · 선택 월 합계와 별도</small></article></div>
+<section class="panel explorer-panel" aria-labelledby="monthlyTitle">
+  <div class="panel-heading"><div><p class="eyebrow">USER BREAKDOWN · UTC</p><h2 id="monthlyTitle">월별 · 날짜별 사용자 사용량</h2></div><span class="legend">단위: 토큰</span></div>
+  <div class="explorer-toolbar"><span id="monthlyRange"></span><label>날짜 구분 <select id="monthlyDayFilter"><option value="all">전체</option><option value="weekday">주중</option><option value="weekend">주말</option></select></label></div>
+  <div class="explorer-layout"><div class="explorer-main"><div class="interactive-chart"><svg id="monthlyDailyChart" viewBox="0 0 900 300" role="group" aria-label="날짜별 사용자 사용량. 방향키로 날짜 이동, Enter로 선택"></svg><div id="monthlyTooltip" class="chart-tooltip" role="tooltip" hidden></div></div><div id="monthlyLegend" class="chart-legend"></div><p class="chart-help">날짜에 마우스를 올리거나 클릭하세요. Tab·방향키로도 이동할 수 있습니다. 점선은 기록 없음이며 0을 뜻하지 않습니다.</p></div>
+  <aside class="day-inspector" aria-label="선택한 날짜의 사용자별 사용량"><div class="inspector-heading"><div><span class="eyebrow">선택한 날짜</span><h3 id="monthlySelectedDate">—</h3></div><label><span class="sr-only">날짜 선택</span><select id="monthlyDateSelect"></select></label></div><div id="monthlyDonut" class="donut-wrap"></div><p id="monthlyDayNote" class="data-note"></p><div class="day-table-wrap"><table class="day-table"><thead><tr><th>사용자 / 서버</th><th>토큰</th><th>비중</th></tr></thead><tbody id="monthlyDayRows"></tbody></table></div></aside></div>
+  <p id="monthlyCoverageNote" class="data-note panel-note"></p>
+</section>
+<section class="panel"><div class="panel-heading"><h2>월별 비교</h2><span class="legend">계정 보고값 · 누락 날짜 제외</span></div><div id="monthComparison" class="month-comparison"></div></section></section>
+<section id="view-lifetime" role="tabpanel" aria-labelledby="tab-lifetime" hidden><div class="scope-heading"><div><h2>전체 누적 사용량</h2><p>계정이 보고한 누적값입니다. 주간·월별 사용량과 합산하지 않습니다.</p></div><span class="scope-badge">전체 기간 · ALL TIME</span></div>
+<section class="hero">
+        <div>
+          <p class="eyebrow">TOTAL PROCESSED</p>
+          <div class="token-total" id="totalTokens">—</div>
+          <p class="hero-copy" id="totalSourceLabel">공유 계정의 전체 누적 토큰을 불러오는 중입니다</p>
+        </div>
 
-      <section class="panel sessions-panel">
+      </section>
+<section class="panel reconciliation-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">COLLECTION COVERAGE</p><h2>계정 전체값과 세션 귀속 대조</h2></div>
+          <div class="legend" id="coverageLegend"><i></i> 관측 기준 계산 중</div>
+        </div>
+        <div class="reconciliation-grid">
+          <article><span>계정 누적</span><strong id="reconAccountTotal">—</strong><small>app-server 전체값</small></article>
+          <article><span>세션 귀속 누적</span><strong id="reconSessionTotal">—</strong><small>모든 수집 노드</small></article>
+          <article><span>누적 미귀속 차이</span><strong id="reconLifetimeGap">—</strong><small>설치 전 이력 포함</small></article>
+          <article><span>표시 중인 세션 누적</span><strong id="sessionTokens">—</strong><small>보관 제외 · 주간량 아님</small></article>
+        </div>
+        <div class="coverage-track"><i id="coverageBar"></i></div>
+        <div class="coverage-reasons" id="coverageReasons"></div>
+      </section>
+<div class="period-metrics lifetime-extra"><article><span>계정 최고 일일 사용량</span><strong id="peakDailyTokens">—</strong><small>계정이 보고한 최고치</small></article><article><span>현재 연속 사용</span><strong id="currentStreak">—</strong><small>일 · 계정 보고값</small></article></div></section>
+<section id="view-operations" role="tabpanel" aria-labelledby="tab-operations" hidden><div class="scope-heading"><div><h2>수집 상태와 세션</h2><p>연결 장비, 누적 세션, 관측 차이를 점검합니다.</p></div><span class="scope-badge">운영 · COLLECTION</span></div>
+<section class="metric-grid" aria-label="요약 통계">
+        <article class="metric-card">
+          <span>세션</span><strong id="sessionCount">—</strong><small>보관 제외</small>
+        </article>
+        <article class="metric-card live-card">
+          <span>최근 활성</span><strong id="activeCount">—</strong><small>5분 이내</small>
+        </article>
+        <article class="metric-card">
+          <span>프로젝트</span><strong id="projectCount">—</strong><small>익명 집계</small>
+        </article>
+        <article class="metric-card">
+          <span>모델</span><strong id="modelCount">—</strong><small>사용 중</small>
+        </article>
+      </section>
+<section class="panel account-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">CONNECTED ACCOUNTS</p><h2>수집 계정</h2></div>
+          <div class="legend"><i></i> 토큰 원문 제외</div>
+        </div>
+        <div class="account-grid" id="accountGrid"></div>
+      </section>
+<section class="panel sessions-panel">
         <div class="panel-heading session-heading">
           <div><p class="eyebrow">ANONYMIZED SESSIONS</p><h2>세션별 사용량</h2></div>
           <label class="search"><span>⌕</span><input id="searchInput" placeholder="모델 또는 세션 검색" /></label>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>상태</th><th>서버 / 사용자</th><th>세션</th><th>프로젝트</th><th>모델</th><th>토큰</th><th>최근 변화</th><th>마지막 활동</th><th><span class="sr-only">상세</span></th></tr></thead>
+            <thead><tr><th>상태</th><th>서버 / 사용자</th><th>세션</th><th>프로젝트</th><th>모델</th><th>세션 누적 / 주간</th><th>최근 변화</th><th>마지막 활동</th><th><span class="sr-only">상세</span></th></tr></thead>
             <tbody id="sessionRows"></tbody>
           </table>
           <div class="empty-table" id="emptyTable">표시할 세션이 없습니다.</div>
         </div>
       </section>
-
-      <footer>
-        <span>본문·제목·경로·원본 ID는 수집하지 않습니다.</span>
-        <span id="refreshLabel">자동 새로고침</span>
-      </footer>
-    </main>
-    <script src="/app.js"></script>
-  </body>
-</html>
+<details class="panel diagnostic-panel"><summary>수집 진단 · 관측 구간과 최근 14일 이벤트</summary><div class="period-metrics"><article><span>현재 관측 구간 차이</span><strong id="reconPeriodGap">—</strong><small id="reconPeriodRange">관측 시작 대기</small></article></div><section class="panel trend-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">VERIFIED DAILY USAGE</p><h2>주중·주말 사용자별 사용량 추이</h2></div>
+          <div class="legend"><i></i> 최근 14일</div>
+        </div>
+        <p class="trend-note" id="trendNote">수집기가 확인한 세션 이벤트 기준 · 계정 전체 사용량과 다를 수 있습니다.</p>
+        <div class="trend-legend" id="trendUserLegend"></div>
+        <div class="trend-grid" id="trendGrid">
+          <article class="trend-card">
+            <div class="trend-card-heading"><h3>주중 <small>월–금</small></h3><strong id="weekdayTrendTotal">—</strong></div>
+            <div class="trend-chart-scroll"><svg id="weekdayTrendChart" viewBox="0 0 900 245" role="img" aria-label="최근 14일 주중 사용자별 일일 토큰 사용량"></svg></div>
+          </article>
+          <article class="trend-card">
+            <div class="trend-card-heading"><h3>주말 <small>토–일</small></h3><strong id="weekendTrendTotal">—</strong></div>
+            <div class="trend-chart-scroll"><svg id="weekendTrendChart" viewBox="0 0 900 245" role="img" aria-label="최근 14일 주말 사용자별 일일 토큰 사용량"></svg></div>
+          </article>
+        </div>
+        <div class="usage-empty" id="trendEmpty">확인된 세션 사용량이 아직 없습니다. 수집 시작 전 기록이나 미수집 구간은 표시되지 않습니다.</div>
+      </section></details></section>
+<footer><span>본문·제목·경로·원본 ID는 수집하지 않습니다.</span><span id="refreshLabel">자동 새로고침</span></footer>
+</main><script src="/usage-view.js?v=20261008-1"></script><script src="/analytics-view.js?v=20261008-1"></script><script src="/app.js?v=20261008-1"></script></body></html>

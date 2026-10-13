@@ -29,7 +29,7 @@ from urllib import error, request
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_LOG_BACKUPS = 3
 APP_SERVER_TIMEOUT_SECONDS = 15
-COLLECTOR_VERSION = "0.6.0"
+COLLECTOR_VERSION = "0.6.1"
 UPDATE_FILE_NAMES = {"collector.py", "collector_windows_machine.py"}
 
 
@@ -77,14 +77,15 @@ def read_account(auth_file: Path, token: str) -> dict[str, Any]:
 
 
 def _read_rollout_usage_buckets(
-    rollout_path: Any, cutoff: int, offset: int,
-) -> tuple[list[dict[str, int]], int]:
+    rollout_path: Any, cutoff: int, offset: int, previous_total: int | None = None,
+) -> tuple[list[dict[str, int]], int, int | None]:
     if not rollout_path:
-        return [], offset
+        return [], offset, previous_total
     path = Path(str(rollout_path))
     if not path.is_file():
-        return [], offset
+        return [], offset, previous_total
     buckets: dict[int, int] = {}
+    initial_total = previous_total
     try:
         size = path.stat().st_size
         if offset < 0 or offset > size:
@@ -103,7 +104,9 @@ def _read_rollout_usage_buckets(
                     event = json.loads(line)
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
-                payload = event.get("payload") if isinstance(event, dict) else None
+                if not isinstance(event, dict):
+                    continue
+                payload = event.get("payload")
                 if event.get("type") != "event_msg" or not isinstance(payload, dict):
                     continue
                 if payload.get("type") != "token_count":
@@ -111,8 +114,13 @@ def _read_rollout_usage_buckets(
                 info = payload.get("info")
                 usage = info.get("last_token_usage") if isinstance(info, dict) else None
                 tokens = _optional_nonnegative_int(usage.get("total_tokens")) if isinstance(usage, dict) else None
+                total_usage = info.get("total_token_usage") if isinstance(info, dict) else None
+                total = _optional_nonnegative_int(total_usage.get("total_tokens")) if isinstance(total_usage, dict) else None
+                repeated = total is not None and total == previous_total
+                if total is not None:
+                    previous_total = total
                 timestamp = event.get("timestamp")
-                if tokens is None or not isinstance(timestamp, str):
+                if repeated or tokens is None or not isinstance(timestamp, str):
                     continue
                 try:
                     occurred_at = int(datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp())
@@ -124,11 +132,11 @@ def _read_rollout_usage_buckets(
                 buckets[bucket_at] = buckets.get(bucket_at, 0) + tokens
             next_offset = stream.tell()
     except OSError:
-        return [], offset
+        return [], offset, initial_total
     return [
         {"at": at, "tokens": tokens}
         for at, tokens in sorted(buckets.items())[-20_000:]
-    ], next_offset
+    ], next_offset, previous_total
 
 
 def read_sessions(
@@ -466,7 +474,7 @@ def track_target_usage(
         item for item in intervals
         if isinstance(item, dict) and int(item.get("end") or 0) >= scan_at - 14 * 86400
     ]
-    continuous = not first_scan and scan_at - previous_scan_at <= 120
+    continuous = not first_scan and 0 <= scan_at - previous_scan_at <= 120
     if continuous and previous_account_key == current_account_key:
         if intervals and intervals[-1].get("account_key") == current_account_key:
             intervals[-1]["end"] = scan_at
@@ -501,14 +509,19 @@ def track_target_usage(
             delta_account_key = current_account_key
             if account_changed and int(session.get("updated_at") or 0) <= login_transition_at + 5:
                 delta_account_key = str(previous_account_key)
-            if current_tokens >= previous_tokens and delta_account_key == target_account_key:
+            if continuous and current_tokens >= previous_tokens and delta_account_key == target_account_key:
                 target_tokens += current_tokens - previous_tokens
             record["last_tokens"] = current_tokens
             record["target_tokens"] = target_tokens
         else:
             can_claim_initial = (
                 current_account_key == target_account_key
-                and (not first_scan or int(session["created_at"]) >= login_transition_at - 5)
+                and (
+                    (first_scan and int(session["created_at"]) >= login_transition_at - 5)
+                    or (continuous and int(session["created_at"]) >= max(
+                        previous_scan_at, login_transition_at if account_changed else previous_scan_at,
+                    ))
+                )
             )
             record = {
                 "last_tokens": current_tokens,
@@ -539,10 +552,11 @@ def track_target_usage(
                 except OSError:
                     record["rollout_offset"] = 0
             else:
-                new_buckets, next_offset = _read_rollout_usage_buckets(
-                    rollout_path, cutoff, int(previous_offset),
+                new_buckets, next_offset, last_total = _read_rollout_usage_buckets(
+                    rollout_path, cutoff, int(previous_offset), record.get("rollout_total_tokens"),
                 )
                 record["rollout_offset"] = next_offset
+                record["rollout_total_tokens"] = last_total
                 for bucket in new_buckets:
                     key = str(int(bucket["at"]))
                     candidates[key] = candidates.get(key, 0) + int(bucket["tokens"])
@@ -696,6 +710,7 @@ def apply_collector_update(update: dict[str, Any], script_dir: Path | None = Non
         raise RuntimeError("collector update has no files")
     target_dir = (script_dir or Path(__file__).resolve().parent).resolve()
     prepared: list[tuple[Path, Path, Path | None]] = []
+    replaced: list[tuple[Path, Path | None]] = []
     try:
         for name, metadata in raw_files.items():
             if name not in UPDATE_FILE_NAMES or not isinstance(metadata, dict):
@@ -722,6 +737,7 @@ def apply_collector_update(update: dict[str, Any], script_dir: Path | None = Non
                 if backup.exists():
                     backup.unlink()
                 target.replace(backup)
+            replaced.append((target, backup))
             temporary.replace(target)
         if os.name == "nt":
             try:
@@ -738,13 +754,16 @@ def apply_collector_update(update: dict[str, Any], script_dir: Path | None = Non
                 pass
         return True
     except Exception:
-        for target, temporary, backup in reversed(prepared):
+        for target, temporary, _ in reversed(prepared):
             if temporary.exists():
                 temporary.unlink()
+        for target, backup in reversed(replaced):
             if backup is not None and backup.exists():
                 if target.exists():
                     target.unlink()
                 backup.replace(target)
+            elif backup is None and target.exists():
+                target.unlink()
         raise
 
 

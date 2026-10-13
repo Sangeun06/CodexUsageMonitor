@@ -10,11 +10,113 @@ from pathlib import Path
 from pathlib import PureWindowsPath
 from unittest.mock import patch
 
-from collector import COLLECTOR_VERSION, append_log, apply_collector_update, normalize_app_server_snapshot, read_sessions, snapshot, track_target_usage
+from collector import COLLECTOR_VERSION, _read_rollout_usage_buckets, append_log, apply_collector_update, normalize_app_server_snapshot, read_sessions, snapshot, track_target_usage
 from collector_windows_machine import discover_profiles, profile_snapshot, profiles_root_for_drive
 
 
 class CollectorTest(unittest.TestCase):
+    def test_rollout_parser_skips_non_object_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rollout = Path(directory) / "rollout.jsonl"
+            rollout.write_text('null\n[]\n42\n' + json.dumps({
+                "type": "event_msg", "timestamp": "1970-01-01T00:17:00Z",
+                "payload": {"type": "token_count", "info": {
+                    "last_token_usage": {"total_tokens": 40},
+                }},
+            }) + '\n')
+            buckets, offset, _ = _read_rollout_usage_buckets(rollout, 0, 0)
+            self.assertEqual(buckets, [{"at": 1020, "tokens": 40}])
+            self.assertEqual(offset, rollout.stat().st_size)
+
+    def test_repeated_cumulative_rollout_usage_is_counted_once_across_scans(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rollout = Path(directory) / "rollout.jsonl"
+            def event(total, last):
+                return json.dumps({
+                    "type": "event_msg", "timestamp": "1970-01-01T00:17:00Z",
+                    "payload": {"type": "token_count", "info": {
+                        "total_token_usage": {"total_tokens": total},
+                        "last_token_usage": {"total_tokens": last},
+                    }},
+                }) + '\n'
+            rollout.write_text(event(100, 40) + event(100, 40))
+            buckets, offset, total = _read_rollout_usage_buckets(rollout, 0, 0)
+            self.assertEqual(buckets, [{"at": 1020, "tokens": 40}])
+            with rollout.open('a') as stream:
+                stream.write(event(100, 40) + event(150, 50))
+            buckets, _, _ = _read_rollout_usage_buckets(rollout, 0, offset, total)
+            self.assertEqual(buckets, [{"at": 1020, "tokens": 50}])
+
+    def test_usage_growth_during_an_observation_gap_is_not_claimed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth, state = root / "auth.json", root / "state.json"
+            auth.write_text("{}")
+            os.utime(auth, (800, 800))
+            session = {"key": "session", "created_at": 900, "updated_at": 1000, "tokens": 100}
+            with patch("collector.time.time", return_value=1000):
+                track_target_usage([session], "target", "target", auth, state, "node")
+            session.update(tokens=300, updated_at=2000)
+            with patch("collector.time.time", return_value=2000):
+                resumed = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertEqual(resumed[0]["tokens"], 100)
+            session.update(tokens=350, updated_at=2030)
+            with patch("collector.time.time", return_value=2030):
+                continuous = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertEqual(continuous[0]["tokens"], 150)
+
+    def test_new_session_during_an_observation_gap_is_not_claimed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth, state = root / "auth.json", root / "state.json"
+            auth.write_text("{}")
+            with patch("collector.time.time", return_value=1000):
+                track_target_usage([], "target", "target", auth, state, "node")
+            session = {"key": "session", "created_at": 1100, "updated_at": 2000, "tokens": 100}
+            with patch("collector.time.time", return_value=2000):
+                resumed = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertEqual(resumed, [])
+            session.update(tokens=120, updated_at=2030)
+            with patch("collector.time.time", return_value=2030):
+                continuous = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertEqual(continuous[0]["tokens"], 20)
+
+    def test_newly_observed_session_before_a_target_login_is_not_claimed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            auth, state = root / "auth.json", root / "state.json"
+            auth.write_text("{}")
+            with patch("collector.time.time", return_value=1000):
+                track_target_usage([], "other", "target", auth, state, "node")
+            os.utime(auth, (1050, 1050))
+            session = {"key": "session", "created_at": 1020, "updated_at": 1040, "tokens": 100}
+            with patch("collector.time.time", return_value=1100):
+                switched = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertEqual(switched, [])
+            session.update(tokens=125, updated_at=1130)
+            with patch("collector.time.time", return_value=1130):
+                continuous = track_target_usage([session], "target", "target", auth, state, "node")
+            self.assertEqual(continuous[0]["tokens"], 25)
+
+    def test_failed_update_validation_keeps_current_file_and_existing_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "collector.py"
+            backup = root / "collector.py.previous"
+            target.write_text("CURRENT = True\n")
+            backup.write_text("PREVIOUS = True\n")
+            content = b"NEW = True\n"
+            update = {"version": "9.0.0", "files": {
+                "collector.py": {"sha256": hashlib.sha256(content).hexdigest(),
+                                 "content": base64.b64encode(content).decode()},
+                "collector_windows_machine.py": {"sha256": "invalid", "content": "eA=="},
+            }}
+            with self.assertRaisesRegex(RuntimeError, "checksum"):
+                apply_collector_update(update, root)
+            self.assertEqual(target.read_text(), "CURRENT = True\n")
+            self.assertEqual(backup.read_text(), "PREVIOUS = True\n")
+            self.assertFalse((root / "collector.py.update").exists())
+
     def test_verified_rollout_buckets_are_sent_only_after_continuous_target_observation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -89,7 +191,7 @@ class CollectorTest(unittest.TestCase):
             self.assertTrue(apply_collector_update(update, root))
             self.assertEqual(target.read_bytes(), content)
             self.assertEqual((root / "collector.py.previous").read_text(), "OLD = True\n")
-            self.assertEqual(COLLECTOR_VERSION, "0.6.0")
+            self.assertEqual(COLLECTOR_VERSION, "0.6.1")
 
     def test_app_server_snapshot_keeps_only_aggregate_usage(self):
         result = normalize_app_server_snapshot(

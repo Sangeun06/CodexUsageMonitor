@@ -1,11 +1,17 @@
+import base64
+import hashlib
+import hmac
+import io
+import json
 import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from server import Config, UsageStore
+from server import Collector, Config, UsageStore, build_handler
 
 
 class UsageStoreTest(unittest.TestCase):
@@ -60,6 +66,197 @@ class UsageStoreTest(unittest.TestCase):
         self.assertEqual(payload["sessions"][0]["delta"], 300)
         self.assertEqual(len(payload["history"]), 2)
 
+    def report(self, node_key="node-a", tokens=100, lifetime=1000, observed_at=None):
+        usage = {
+            "source": "codex-app-server", "summary": {"lifetime_tokens": lifetime},
+            "daily_usage": [{"date": "2026-10-05", "tokens": 100}],
+            "rate_limits": [{"id": "codex", "primary": {
+                "used_percent": 20, "window_minutes": 10080, "resets_at": 1_500_000,
+            }}],
+        }
+        if observed_at is not None:
+            usage["observed_at"] = observed_at
+        return {
+            "node": {"key": node_key, "hostname": "worker", "os_user": node_key},
+            "account": {"key": "shared-acct"},
+            "sessions": [{"key": "shared-session", "project_key": "project",
+                          "tokens": tokens, "created_at": 800_000, "updated_at": 1_000_030}],
+            "account_usage": usage,
+        }
+
+    def test_stale_account_report_does_not_change_weekly_history(self):
+        self.store.ingest(self.report(lifetime=1000), now=1_000_000)
+        stale = self.report(lifetime=900)
+        stale["account_usage"]["rate_limits"][0]["primary"]["used_percent"] = 5
+        self.store.ingest(stale, now=1_000_030)
+        weekly = self.store.dashboard(now=1_000_030)["weekly_usage"]
+        self.assertEqual(weekly["used_percent"], 20)
+        self.assertEqual(weekly["points"][-1]["used_percent"], 20)
+
+    def test_delayed_report_with_equal_lifetime_cannot_revert_weekly_reset(self):
+        latest = self.report(observed_at=1_100_010)
+        latest["account_usage"]["rate_limits"][0]["primary"].update(
+            used_percent=0, resets_at=1_704_800,
+        )
+        self.store.ingest(latest, now=1_100_010)
+        self.store.ingest(self.report(observed_at=1_000_000), now=1_100_040)
+        weekly = self.store.dashboard(now=1_100_040)["weekly_usage"]
+        self.assertEqual(weekly["resets_at"], "1970-01-20T17:33:20Z")
+        self.assertEqual(weekly["used_percent"], 0)
+
+    def test_partial_account_queries_preserve_last_successful_fields(self):
+        self.store.ingest(self.report(), now=1_000_000)
+        limits_only = self.report(lifetime=None)
+        limits_only["account_usage"]["daily_usage"] = []
+        limits_only["account_usage"]["rate_limits"][0]["primary"]["used_percent"] = 25
+        self.store.ingest(limits_only, now=1_000_030)
+        usage = self.store.read_account_usage()
+        self.assertEqual(usage["summary"]["lifetime_tokens"], 1000)
+        self.assertEqual(usage["daily_usage"], [{"date": "2026-10-05", "tokens": 100}])
+        self.assertEqual(usage["rate_limits"][0]["primary"]["used_percent"], 25)
+        usage_only = self.report(lifetime=1100)
+        usage_only["account_usage"]["rate_limits"] = []
+        self.store.ingest(usage_only, now=1_000_060)
+        usage = self.store.read_account_usage()
+        self.assertEqual(usage["summary"]["lifetime_tokens"], 1100)
+        self.assertEqual(usage["rate_limits"][0]["primary"]["used_percent"], 25)
+
+    def test_collect_uses_the_same_local_collector_sessions_as_dashboard(self):
+        node_key = self.store.local_node_key()
+        self.store.ingest(self.report(node_key=node_key), now=1_000_000)
+        self.store.collect(now=1_000_000)
+        self.store.ingest(self.report(node_key=node_key, tokens=150, lifetime=1100), now=1_000_030)
+        self.store.collect(now=1_000_030)
+        dashboard = self.store.dashboard(now=1_000_031)
+        self.assertEqual(dashboard["sessions"][0]["delta"], 50)
+        self.assertEqual(dashboard["history"][-1]["sessions"], 1)
+        self.assertEqual(dashboard["reconciliation"]["period"]["attributed_session_tokens"], 50)
+
+    def test_session_baselines_are_separate_for_each_node(self):
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(self.report("node-a", tokens=100), now=1_000_000)
+            self.store.ingest(self.report("node-b", tokens=500), now=1_000_000)
+            self.store.collect(now=1_000_000)
+            self.store.ingest(self.report("node-a", tokens=150, lifetime=1300), now=1_000_030)
+            self.store.ingest(self.report("node-b", tokens=700, lifetime=1300), now=1_000_030)
+            self.store.collect(now=1_000_030)
+            dashboard = self.store.dashboard(now=1_000_031)
+        deltas = {session["node_key"]: session["delta"] for session in dashboard["sessions"]}
+        self.assertEqual(deltas, {"node-a": 50, "node-b": 200})
+        self.assertEqual(dashboard["reconciliation"]["period"]["attributed_session_tokens"], 250)
+
+    def test_remote_collecting_works_without_a_local_codex_database(self):
+        self.source.unlink()
+        self.store.ingest(self.report(), now=1_000_000)
+        self.store.collect(now=1_000_000)
+        self.assertEqual(self.store.dashboard(now=1_000_000)["summary"]["session_count"], 1)
+
+    def test_ingest_rejects_invalid_payload_shapes_and_overlong_node_keys(self):
+        for payload in ([], {"node": []}, {"node": self.report()["node"], "account": []},
+                        self.report(node_key="x" * 65)):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                self.store.ingest(payload, now=1_000_000)
+
+    def test_account_baseline_preserves_growth_within_one_sampling_bucket(self):
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(self.report(lifetime=1000), now=1_000_000)
+            self.store.collect(now=1_000_000)
+            latest = self.report(tokens=120, lifetime=1050)
+            latest["sessions"][0]["updated_at"] = 1_000_010
+            self.store.ingest(latest, now=1_000_010)
+            self.store.collect(now=1_000_010)
+            period = self.store.dashboard(now=1_000_010)["reconciliation"]["period"]
+        self.assertEqual(period["account_tokens"], 50)
+        self.assertEqual(period["attributed_session_tokens"], 20)
+
+    def test_period_combines_verified_and_snapshot_tokens_per_session(self):
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            first = self.report()
+            second_session = dict(first["sessions"][0], key="second-session", tokens=100)
+            first["sessions"].append(second_session)
+            self.store.ingest(first, now=1_000_000)
+            self.store.collect(now=1_000_000)
+            latest = self.report(tokens=200, lifetime=1500)
+            latest["sessions"].append(dict(second_session, usage_buckets=[{"at": 1_000_020, "tokens": 150}]))
+            self.store.ingest(latest, now=1_000_030)
+            self.store.collect(now=1_000_030)
+            # The minute starting at 1_000_020 is complete only after 1_000_080.
+            period = self.store.dashboard(now=1_000_090)["reconciliation"]["period"]
+        self.assertEqual(period["attributed_session_tokens"], 250)
+
+    def test_existing_sessions_at_first_account_sample_do_not_count_as_growth(self):
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            first = self.report()
+            first["sessions"][0]["created_at"] = 1_000_000
+            self.store.ingest(first, now=1_000_000)
+            self.store.collect(now=1_000_000)
+            latest = self.report(tokens=120, lifetime=1050)
+            latest["sessions"][0]["created_at"] = 1_000_000
+            self.store.ingest(latest, now=1_000_030)
+            self.store.collect(now=1_000_030)
+            period = self.store.dashboard(now=1_000_030)["reconciliation"]["period"]
+        self.assertEqual(period["attributed_session_tokens"], 20)
+
+    def test_legacy_snapshot_migration_keeps_history_and_assigns_known_nodes(self):
+        self.store.ingest(self.report(), now=1_000_000)
+        with closing(sqlite3.connect(self.monitor)) as db, db:
+            db.execute("DROP TABLE session_samples")
+            db.execute("""CREATE TABLE session_samples (
+                observed_at INTEGER NOT NULL, session_key TEXT NOT NULL,
+                project_key TEXT NOT NULL, model TEXT NOT NULL, tokens_used INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL, archived INTEGER NOT NULL,
+                PRIMARY KEY (observed_at, session_key))""")
+            db.executemany("INSERT INTO session_samples VALUES (?, ?, ?, ?, ?, ?, ?)", [
+                (1_000_000, "shared-session", "project", "gpt-test", 100, 1_000_000, 0),
+                (1_000_000, "local-session", "project", "gpt-test", 75, 1_000_000, 0),
+            ])
+        self.store = UsageStore(self.store.config)
+        with closing(sqlite3.connect(self.monitor)) as db:
+            rows = db.execute("SELECT node_key, session_key, tokens_used FROM session_samples ORDER BY session_key").fetchall()
+        self.assertEqual(rows, [(self.store.local_node_key(), "local-session", 75),
+                                ("node-a", "shared-session", 100)])
+        # A second initialization must be safe and keep the migrated rows.
+        UsageStore(self.store.config)
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(self.report(tokens=150, lifetime=1100), now=1_000_030)
+            self.store.collect(now=1_000_030)
+            dashboard = self.store.dashboard(now=1_000_031)
+        self.assertEqual(dashboard["sessions"][0]["delta"], 50)
+        self.assertEqual(dashboard["reconciliation"]["period"]["attributed_session_tokens"], 50)
+
+    def handler(self, payload, path="/api/ingest"):
+        body = json.dumps(payload).encode()
+        handler = object.__new__(build_handler(self.store, Collector(self.store)))
+        handler.path = path
+        handler.rfile = io.BytesIO(body)
+        handler.headers = {
+            "Content-Length": str(len(body)), "X-Codex-Timestamp": "1000000",
+            "X-Codex-Signature": hmac.new(self.store.collector_token.encode(), b"1000000." + body, hashlib.sha256).hexdigest(),
+            "Authorization": "Basic " + base64.b64encode((self.store.dashboard_user + ":" + self.store.dashboard_password).encode()).decode(),
+        }
+        handler.send_json = Mock()
+        return handler
+
+    def test_invalid_http_payloads_return_400(self):
+        for payload in (None, [], {"node": [1]}):
+            handler = self.handler(payload)
+            with patch("server.time.time", return_value=1_000_000):
+                handler.do_POST()
+            self.assertEqual(handler.send_json.call_args.args[1], 400)
+        handler = self.handler([], f"/api/nodes/{self.store.local_node_key()}/alias")
+        handler.do_PUT()
+        self.assertEqual(handler.send_json.call_args.args[1], 400)
+
+    def test_http_collect_failure_returns_retryable_error(self):
+        handler = self.handler(self.report())
+        with patch("server.time.time", return_value=1_000_000), patch.object(self.store, "collect", side_effect=sqlite3.OperationalError("locked")):
+            handler.do_POST()
+        self.assertEqual(handler.send_json.call_args.args[1], 503)
+
+    def test_http_dashboard_login_supports_unicode_passwords(self):
+        self.store.dashboard_password = "테스트-비밀번호"
+        self.assertTrue(self.handler({}).dashboard_authorized())
+
     def test_ingest_adds_remote_node_without_raw_content(self):
         payload = {
             "node": {"key": "remote-node", "hostname": "worker-1", "os_user": "alice"},
@@ -75,6 +272,44 @@ class UsageStoreTest(unittest.TestCase):
         self.assertEqual(remote["project_name"], "frontend")
         self.assertEqual(remote["hostname"], "worker-1")
         self.assertTrue(any(node["account"].get("email") == "alice@example.com" for node in dashboard["nodes"]))
+
+    def test_daily_user_trend_separates_weekdays_weekends_and_nodes(self):
+        def at(day, hour=12):
+            return int(datetime(2026, 9, day, hour).timestamp())
+
+        now = at(14, 20)  # Monday, server-local calendar date.
+        def report(node_key, os_user, buckets):
+            return {
+                "node": {"key": node_key, "hostname": "worker", "os_user": os_user},
+                "account": {"key": "shared-acct"},
+                "sessions": [{
+                    "key": f"session-{node_key}", "project_key": "project", "model": "gpt-test",
+                    "tokens": 1000, "created_at": at(12), "updated_at": now,
+                    "usage_buckets": [{"at": at(day), "tokens": tokens} for day, tokens in buckets],
+                }],
+            }
+
+        alice = report("node-a", "alice", [(12, 100), (13, 150), (14, 200)])
+        bob = report("node-b", "bob", [(12, 50), (14, 300)])
+        self.store.ingest(alice, now=now)
+        self.store.ingest(alice, now=now + 1)  # Repeated reports must not double-count.
+        self.store.ingest(bob, now=now)
+        self.store.set_node_alias("node-a", "Alice Team")
+
+        dashboard = self.store.dashboard(now=now)
+        trend = dashboard["daily_user_trend"]
+        days = {day["date"]: day for day in trend["days"]}
+        self.assertEqual(len(trend["days"]), 14)
+        self.assertEqual(days["2026-09-12"], {
+            "date": "2026-09-12", "day_type": "weekend", "total_tokens": 150,
+            "users": {"node-a": 100, "node-b": 50},
+        })
+        self.assertEqual(days["2026-09-13"]["total_tokens"], 150)
+        self.assertEqual(days["2026-09-14"]["day_type"], "weekday")
+        self.assertEqual(days["2026-09-14"]["users"], {"node-a": 200, "node-b": 300})
+        self.assertEqual(days["2026-09-11"]["total_tokens"], 0)
+        self.assertEqual(next(node for node in dashboard["nodes"] if node["key"] == "node-a")["display_name"], "Alice Team")
+        self.assertNotIn("session-node-a", str(trend))
 
     def test_account_usage_is_canonical_and_not_summed_across_nodes(self):
         def report(node_key, hostname, lifetime, used_percent):
@@ -152,6 +387,228 @@ class UsageStoreTest(unittest.TestCase):
         self.assertEqual(worker["attributed_total_tokens"], 300)
         self.assertFalse(worker["partial"])
         self.assertEqual(worker["status"], "high")
+
+    def test_weekly_breakdown_counts_users_and_untracked_tokens_from_same_period(self):
+        def report(node_key, tokens, lifetime):
+            return {
+                "node": {"key": node_key, "hostname": node_key, "os_user": node_key},
+                "account": {"key": "shared-acct"},
+                "sessions": [{
+                    "key": f"session-{node_key}", "project_key": "project", "model": "gpt-test",
+                    "tokens": tokens, "created_at": 900_000, "updated_at": 1_000_030,
+                }],
+                "account_usage": {
+                    "source": "codex-app-server", "summary": {"lifetime_tokens": lifetime},
+                    "daily_usage": [], "rate_limits": [{
+                        "id": "codex", "name": "codex", "primary": {
+                            "used_percent": 20, "window_minutes": 10080, "resets_at": 1_500_000,
+                        }, "secondary": None,
+                    }],
+                },
+            }
+
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(report("node-a", 100, 1000), now=1_000_000)
+            self.store.ingest(report("node-b", 50, 1000), now=1_000_001)
+            self.store.collect(now=1_000_001)
+            self.store.ingest(report("node-a", 200, 1300), now=1_000_030)
+            self.store.ingest(report("node-b", 100, 1300), now=1_000_031)
+            self.store.collect(now=1_000_031)
+            period = self.store.dashboard(now=1_000_031)["reconciliation"]["period"]
+
+        self.assertEqual(period["account_tokens"], 300)
+        self.assertEqual(period["account_sample_count"], 4)
+        self.assertEqual(period["attributed_session_tokens"], 150)
+        self.assertEqual(period["difference_tokens"], 150)
+        self.assertEqual(period["untracked_tokens"], 150)
+        self.assertEqual(period["over_attributed_tokens"], 0)
+        self.assertEqual(period["participant_count"], 2)
+        self.assertEqual(period["user_tokens"], [
+            {"node_key": "node-a", "tokens": 100},
+            {"node_key": "node-b", "tokens": 50},
+        ])
+
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(report("node-a", 600, 1300), now=1_000_060)
+            self.store.collect(now=1_000_060)
+            excess = self.store.dashboard(now=1_000_060)["reconciliation"]["period"]
+        self.assertEqual(excess["difference_tokens"], -250)
+        self.assertEqual(excess["untracked_tokens"], 0)
+        self.assertEqual(excess["over_attributed_tokens"], 250)
+
+    def test_weekly_breakdown_uses_verified_events_when_snapshot_delta_is_lower(self):
+        def report(tokens, lifetime, buckets):
+            return {
+                "node": {"key": "node-a", "hostname": "worker", "os_user": "alice"},
+                "account": {"key": "shared-acct"},
+                "sessions": [{
+                    "key": "session-a", "project_key": "project", "model": "gpt-test",
+                    "tokens": tokens, "created_at": 900_000, "updated_at": 1_000_030,
+                    "usage_buckets": buckets,
+                }],
+                "account_usage": {
+                    "source": "codex-app-server", "summary": {"lifetime_tokens": lifetime},
+                    "daily_usage": [], "rate_limits": [{
+                        "id": "codex", "name": "codex", "primary": {
+                            "used_percent": 20, "window_minutes": 10080, "resets_at": 1_500_000,
+                        }, "secondary": None,
+                    }],
+                },
+            }
+
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(report(100, 1000, []), now=1_000_000)
+            self.store.collect(now=1_000_000)
+            self.store.ingest(report(150, 1300, [{"at": 1_000_020, "tokens": 120}]), now=1_000_030)
+            self.store.collect(now=1_000_030)
+            period = self.store.dashboard(now=1_000_090)["reconciliation"]["period"]
+
+        self.assertEqual(period["account_tokens"], 300)
+        self.assertEqual(period["attributed_session_tokens"], 120)
+        self.assertEqual(period["user_tokens"], [{"node_key": "node-a", "tokens": 120}])
+        self.assertEqual(period["untracked_tokens"], 180)
+
+    def test_weekly_daily_history_survives_late_restart_and_constant_counter(self):
+        start = int(datetime(2026, 10, 3, 6, 37, 17, tzinfo=timezone.utc).timestamp())
+        now = int(datetime(2026, 10, 5, 8, tzinfo=timezone.utc).timestamp())
+        usage = {
+            "source": "codex-app-server", "summary": {"lifetime_tokens": 6000},
+            "daily_usage": [
+                {"date": "2026-10-02", "tokens": 1000},
+                {"date": "2026-10-03", "tokens": 800},  # Cannot split the reset day.
+                {"date": "2026-10-04", "tokens": 1000},
+                {"date": "2026-10-05", "tokens": 999},  # Partial today, not a full day.
+                {"date": "2026-10-06", "tokens": 999},
+            ],
+            "rate_limits": [{"id": "codex", "primary": {
+                "window_minutes": 10080, "resets_at": start + 604800, "used_percent": 37,
+            }}],
+        }
+        def report(key, buckets):
+            return {
+                "node": {"key": key, "hostname": key, "os_user": key},
+                "account": {"key": "shared-acct"}, "account_usage": usage,
+                "sessions": [{"key": key, "tokens": 1_000_000, "created_at": start - 86400,
+                              "updated_at": now, "usage_buckets": buckets}],
+            }
+        self.store.ingest(report("node-a", [
+            {"at": start - 17, "tokens": 5000},  # Minute overlaps the reset; excluded.
+            {"at": start + 43, "tokens": 100},
+            {"at": now - 120, "tokens": 100},
+        ]), now=now - 60)
+        self.store.ingest(report("node-b", [{"at": now - 86400, "tokens": 50}]), now=now)
+        dashboard = self.store.dashboard(now=now)
+        weekly = dashboard["weekly_token_breakdown"]
+        self.assertEqual(dashboard["reconciliation"]["period"]["account_tokens"], 0)
+        self.assertEqual(weekly["account_tokens"], 1000)
+        self.assertEqual(weekly["account_dates"], ["2026-10-04"])
+        self.assertEqual(weekly["attributed_session_tokens"], 250)
+        self.assertEqual(weekly["untracked_tokens"], 750)
+        self.assertEqual(weekly["participant_count"], 2)
+        self.assertTrue(weekly["is_lower_bound"])
+        self.assertTrue(weekly["comparable"])
+
+        # Missing/lagging account data cannot turn an oversized user sum into
+        # 100% attribution with zero untracked tokens.
+        usage["daily_usage"][2]["tokens"] = 100
+        self.store.ingest(report("node-b", [{"at": now - 86400, "tokens": 50}]), now=now + 30)
+        insufficient = self.store.dashboard(now=now + 30)["weekly_token_breakdown"]
+        self.assertFalse(insufficient["comparable"])
+        self.assertIsNone(insufficient["untracked_tokens"])
+
+    def test_weekly_breakdown_does_not_invent_missing_account_total(self):
+        weekly = {"window_started_at": "2026-10-03T06:37:17Z", "resets_at": "2026-10-10T06:37:17Z"}
+        result = self.store.read_weekly_token_breakdown(
+            {"daily_usage": []}, weekly, [], None,
+            int(datetime(2026, 10, 5, tzinfo=timezone.utc).timestamp()),
+        )
+        self.assertIsNone(result["account_tokens"])
+        self.assertIsNone(result["untracked_tokens"])
+        self.assertFalse(result["comparable"])
+
+    def test_monthly_analysis_retains_reported_events_beyond_two_weeks(self):
+        now = int(datetime(2026, 10, 6, tzinfo=timezone.utc).timestamp())
+        report = self.report()
+        report["sessions"][0]["usage_buckets"] = [
+            {"at": now - 20 * 86400, "tokens": 100},
+            {"at": now - 94 * 86400, "tokens": 999},
+        ]
+        self.store.ingest(report, now=now)
+        with self.store._connect_monitor() as db:
+            rows = db.execute("SELECT tokens_used FROM collector_session_usage").fetchall()
+        self.assertEqual([row["tokens_used"] for row in rows], [100])
+
+    def test_new_user_without_events_appears_in_all_weekly_views(self):
+        start = int(datetime(2026, 10, 3, 6, tzinfo=timezone.utc).timestamp())
+        now = start + 3 * 86400
+        report = self.report(node_key="new-user")
+        report["account_usage"]["rate_limits"][0]["primary"]["resets_at"] = start + 604800
+        report["account_usage"]["daily_usage"] = [{"date": "2026-10-04", "tokens": 1000}]
+        report["sessions"] = [
+            {"key": "new", "tokens": 200, "created_at": now - 3600, "updated_at": now - 600},
+            {"key": "archived", "tokens": 50, "created_at": now - 4000, "updated_at": now - 900, "archived": True},
+            {"key": "old", "tokens": 1_000_000, "created_at": start - 86400, "updated_at": now - 900},
+        ]
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(report, now=now)
+            self.store.collect(now=now)
+            dashboard = self.store.dashboard(now=now)
+        breakdown = dashboard["weekly_token_breakdown"]
+        self.assertEqual(breakdown["user_tokens"], [{"node_key": "new-user", "tokens": 250}])
+        self.assertEqual(breakdown["user_tokens"], dashboard["weekly_user_tokens"])
+        self.assertEqual(breakdown["snapshot_only_tokens"], 250)
+        self.assertEqual(breakdown["verified_event_tokens"], 0)
+        self.assertEqual(breakdown["untracked_tokens"], 750)
+        comparison = next(item for item in dashboard["reconciliation"]["node_comparison"] if item["node_key"] == "new-user")
+        self.assertEqual(comparison["tokens"], 250)
+        visible = {session["key"]: session for session in dashboard["sessions"]}
+        self.assertEqual(visible["new"]["weekly_tokens"], 200)
+        self.assertEqual(visible["new"]["verified_weekly_tokens"], 0)
+        self.assertEqual(visible["old"]["weekly_tokens"], 0)
+        self.assertNotIn("archived", visible)
+        # No usage is silently assigned to a calendar day without timestamps.
+        self.assertEqual(sum(day["total_tokens"] for day in dashboard["daily_user_trend"]["days"]), 0)
+
+    def test_event_boundaries_are_shared_by_weekly_daily_and_session_totals(self):
+        start = int(datetime(2026, 10, 3, 6, 0, 17, tzinfo=timezone.utc).timestamp())
+        now = start + 3 * 86400
+        report = self.report()
+        report["account_usage"]["rate_limits"][0]["primary"]["resets_at"] = start + 604800
+        report["account_usage"]["daily_usage"] = [{"date": "2026-10-04", "tokens": 1000}]
+        report["sessions"] = [{
+            "key": "s", "tokens": 0, "created_at": start - 86400, "updated_at": now,
+            "usage_buckets": [
+                {"at": start - 17, "tokens": 900},
+                {"at": start + 43, "tokens": 100},
+                {"at": now - 17, "tokens": 500},
+            ],
+        }]
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(report, now=now)
+            self.store.ingest(report, now=now)  # Repeated report must not double count.
+            dashboard = self.store.dashboard(now=now)
+        self.assertEqual(dashboard["weekly_token_breakdown"]["attributed_session_tokens"], 100)
+        self.assertEqual(dashboard["sessions"][0]["verified_weekly_tokens"], 100)
+        self.assertEqual(dashboard["reconciliation"]["node_comparison"][0]["tokens"], 100)
+        # The pre-reset minute belongs to the daily graph, but the unfinished
+        # current minute is excluded from every view.
+        self.assertEqual(sum(day["total_tokens"] for day in dashboard["daily_user_trend"]["days"]), 1000)
+
+    def test_pre_reset_snapshot_is_not_used_as_weekly_baseline(self):
+        from usage_aggregation import UsageWindow
+        report = self.report()
+        report["sessions"][0].update(tokens=100, created_at=800, updated_at=990)
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(report, now=990)
+            self.store.collect(now=990)
+            report["sessions"][0].update(tokens=200, updated_at=1010)
+            self.store.ingest(report, now=1010)
+            self.store.collect(now=1010)
+            report["sessions"][0].update(tokens=250, updated_at=1020)
+            self.store.ingest(report, now=1020)
+            nodes, sessions = self.store.read_current_sessions(1020)
+            attribution = self.store.read_period_attribution(sessions, nodes, UsageWindow(1000, 1020))
+        self.assertEqual(sum(item.tokens for item in attribution.values()), 50)
 
     def test_node_comparison_shows_range_for_usage_before_first_observation(self):
         def report(tokens, lifetime):

@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,6 +27,11 @@ from typing import Any, Iterator
 from urllib.parse import urlparse
 
 from collector import COLLECTOR_VERSION, read_app_server_usage
+from usage_analytics import EVENT_RETENTION_DAYS, read_analytics
+from usage_aggregation import (
+    UsageRepository, UsageWindow, aggregate_users, attribute_sessions,
+    build_weekly_breakdown, utc_iso,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -36,10 +41,6 @@ DEFAULT_MONITOR_DB = APP_DIR / "data" / "monitor.sqlite"
 DEFAULT_AUTH_FILE = Path.home() / ".codex" / "auth.json"
 DEFAULT_COLLECTOR_TOKEN = APP_DIR / "data" / "collector.token"
 DEFAULT_DASHBOARD_PASSWORD = APP_DIR / "data" / "dashboard.password"
-
-
-def utc_iso(timestamp: int | float) -> str:
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def anonymous_id(kind: str, value: str, salt: str) -> str:
@@ -131,13 +132,14 @@ class UsageStore:
                 );
                 CREATE TABLE IF NOT EXISTS session_samples (
                     observed_at INTEGER NOT NULL,
+                    node_key TEXT NOT NULL,
                     session_key TEXT NOT NULL,
                     project_key TEXT NOT NULL,
                     model TEXT NOT NULL,
                     tokens_used INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     archived INTEGER NOT NULL,
-                    PRIMARY KEY (observed_at, session_key)
+                    PRIMARY KEY (observed_at, node_key, session_key)
                 );
                 CREATE INDEX IF NOT EXISTS idx_session_samples_key_time
                     ON session_samples(session_key, observed_at DESC);
@@ -212,8 +214,40 @@ class UsageStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_collector_session_usage_time
                     ON collector_session_usage(node_key, bucket_at);
+                CREATE INDEX IF NOT EXISTS idx_collector_session_usage_bucket_at
+                    ON collector_session_usage(bucket_at);
                 """
             )
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(session_samples)")}
+            if "node_key" not in columns:
+                # Old snapshots used only the session hash. Preserve every row,
+                # assigning it to a node only when its origin is unambiguous.
+                db.execute("""CREATE TABLE session_samples_migrated (
+                    observed_at INTEGER NOT NULL, node_key TEXT NOT NULL,
+                    session_key TEXT NOT NULL, project_key TEXT NOT NULL,
+                    model TEXT NOT NULL, tokens_used INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL, archived INTEGER NOT NULL,
+                    PRIMARY KEY (observed_at, node_key, session_key)
+                )""")
+                db.execute(
+                    """INSERT INTO session_samples_migrated
+                       SELECT sample.observed_at,
+                              CASE WHEN origins.node_count = 1 THEN origins.node_key
+                                   WHEN origins.node_count > 1 THEN '' ELSE ? END,
+                              sample.session_key, sample.project_key, sample.model,
+                              sample.tokens_used, sample.updated_at, sample.archived
+                       FROM session_samples AS sample LEFT JOIN (
+                           SELECT session_key, COUNT(DISTINCT node_key) AS node_count,
+                                  MIN(node_key) AS node_key
+                           FROM collector_sessions GROUP BY session_key
+                       ) AS origins ON origins.session_key = sample.session_key""",
+                    (self.local_node_key(),),
+                )
+                db.execute("DROP TABLE session_samples")
+                db.execute("ALTER TABLE session_samples_migrated RENAME TO session_samples")
+            db.execute("""CREATE INDEX IF NOT EXISTS idx_session_samples_node_key_time
+                          ON session_samples(node_key, session_key, observed_at DESC)""")
 
     @staticmethod
     def _version_tuple(value: str) -> tuple[int, ...]:
@@ -256,16 +290,7 @@ class UsageStore:
         recommended = float(pace.get("elapsed_percent") or 0)
         if recommended <= 0 or used < recommended * 1.5:
             return []
-        collector_nodes, collector_sessions = self.read_remote(include_local=True)
-        if any(node["key"] == self.local_node_key() for node in collector_nodes):
-            nodes, all_sessions = collector_nodes, collector_sessions
-        else:
-            local_node = {
-                "key": self.local_node_key(), "hostname": socket.gethostname(),
-                "os_user": getpass.getuser(), "seen_at": now, "account": self.read_account(),
-            }
-            nodes = [local_node] + collector_nodes
-            all_sessions = self.read_sessions() + collector_sessions
+        nodes, all_sessions = self.read_current_sessions(now)
         aliases = self.read_aliases()
         for node in nodes:
             node["display_name"] = aliases.get(node["key"], node["os_user"])
@@ -388,12 +413,18 @@ class UsageStore:
 
     def ingest(self, payload: dict[str, Any], now: int | None = None) -> None:
         now = int(now or time.time())
-        node = payload.get("node") or {}
-        account = payload.get("account") or {}
-        sessions = payload.get("sessions") or []
+        if not isinstance(payload, dict):
+            raise ValueError("invalid collector payload")
+        node = payload.get("node", {})
+        account = payload.get("account", {})
+        sessions = payload.get("sessions", [])
+        if not isinstance(node, dict) or not isinstance(account, dict):
+            raise ValueError("invalid collector node or account")
         required = ("key", "hostname", "os_user")
         if not all(isinstance(node.get(field), str) and node[field] for field in required):
             raise ValueError("invalid collector node")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", node["key"]):
+            raise ValueError("invalid collector node key")
         if not isinstance(sessions, list) or len(sessions) > 10_000:
             raise ValueError("invalid sessions")
         clean_account = {
@@ -464,7 +495,7 @@ class UsageStore:
             )
             db.execute(
                 "DELETE FROM collector_session_usage WHERE bucket_at < ?",
-                (now - 14 * 86400,),
+                (now - EVENT_RETENTION_DAYS * 86400,),
             )
             if alert_receipts:
                 db.executemany(
@@ -554,8 +585,28 @@ class UsageStore:
         raw_usage: dict[str, Any], received_at: int,
     ) -> None:
         usage = self._clean_account_usage(raw_usage, received_at)
+        reported_limits = usage["rate_limits"]
+        lifetime = usage["summary"]["lifetime_tokens"]
+        current = db.execute(
+            "SELECT * FROM account_usage WHERE account_key = ?", (account_key,)
+        ).fetchone()
+        # Validate freshness before writing either the snapshot or its history.
+        if current is not None:
+            if usage["observed_at"] < current["observed_at"]:
+                return
+            if lifetime is not None and current["lifetime_tokens"] is not None and lifetime < current["lifetime_tokens"]:
+                return
+            previous = json.loads(current["usage_json"])
+            usage["summary"] = {
+                field: value if value is not None else previous.get("summary", {}).get(field)
+                for field, value in usage["summary"].items()
+            }
+            if lifetime is None:
+                usage["daily_usage"] = previous.get("daily_usage", [])
+            if not usage["rate_limits"]:
+                usage["rate_limits"] = previous.get("rate_limits", [])
         sample_at = received_at - received_at % 30
-        for limit in usage["rate_limits"]:
+        for limit in reported_limits:
             for window_kind in ("primary", "secondary"):
                 window = limit.get(window_kind)
                 if not window or window.get("window_minutes") is None or window.get("resets_at") is None:
@@ -568,20 +619,13 @@ class UsageStore:
                      window["used_percent"], window["resets_at"]),
                 )
         db.execute("DELETE FROM account_limit_samples WHERE sampled_at < ?", (received_at - 14 * 86400,))
-        lifetime = usage["summary"]["lifetime_tokens"]
-        current = db.execute(
-            "SELECT lifetime_tokens FROM account_usage WHERE account_key = ?", (account_key,)
-        ).fetchone()
-        # Multiple machines report the same account-wide counter. Keep one
-        # canonical snapshot and reject a delayed report that would regress it.
-        if current is not None and current["lifetime_tokens"] is not None:
-            if lifetime is None or lifetime < current["lifetime_tokens"]:
-                return
         if lifetime is not None:
             db.execute(
-                """INSERT OR REPLACE INTO account_token_samples
-                   (account_key, sampled_at, lifetime_tokens) VALUES (?, ?, ?)""",
-                (account_key, sample_at, lifetime),
+                """INSERT INTO account_token_samples
+                   (account_key, sampled_at, lifetime_tokens) VALUES (?, ?, ?)
+                   ON CONFLICT(account_key, sampled_at) DO UPDATE SET
+                   lifetime_tokens=MIN(lifetime_tokens, excluded.lifetime_tokens)""",
+                (account_key, received_at, lifetime),
             )
             db.execute(
                 "DELETE FROM account_token_samples WHERE sampled_at < ?",
@@ -595,7 +639,7 @@ class UsageStore:
                reported_by_node_key=excluded.reported_by_node_key, observed_at=excluded.observed_at,
                received_at=excluded.received_at, lifetime_tokens=excluded.lifetime_tokens""",
             (account_key, json.dumps(usage, separators=(",", ":")), node_key,
-             usage["observed_at"], received_at, lifetime),
+             usage["observed_at"], received_at, usage["summary"]["lifetime_tokens"]),
         )
 
     def store_local_account_usage(self, usage: dict[str, Any], now: int | None = None) -> None:
@@ -660,8 +704,8 @@ class UsageStore:
             rows = db.execute(
                 """SELECT sampled_at, used_percent FROM account_limit_samples
                    WHERE account_key = ? AND limit_id = ? AND window_kind = ?
-                   AND resets_at = ? AND sampled_at >= ? ORDER BY sampled_at""",
-                (account_usage["account_key"], limit_id, window_kind, resets_at, window_start),
+                   AND resets_at = ? AND sampled_at >= ? AND sampled_at <= ? ORDER BY sampled_at""",
+                (account_usage["account_key"], limit_id, window_kind, resets_at, window_start, now),
             ).fetchall()
         window_seconds = int(window["window_minutes"]) * 60
         points = [{"at": utc_iso(window_start), "used_percent": 0.0, "ideal_percent": 0.0}]
@@ -711,192 +755,73 @@ class UsageStore:
             },
         }
 
-    def read_usage_reconciliation(
-        self,
-        all_sessions: list[dict[str, Any]],
-        nodes: list[dict[str, Any]],
-        account_usage: dict[str, Any] | None,
-        weekly_usage: dict[str, Any] | None,
-        now: int,
-    ) -> dict[str, Any] | None:
-        if not account_usage:
-            return None
-        lifetime = account_usage.get("summary", {}).get("lifetime_tokens")
-        if lifetime is None:
-            return None
-        attributed_total = sum(max(0, int(session.get("tokens") or 0)) for session in all_sessions)
-        lifetime_difference = int(lifetime) - attributed_total
-        account_key = account_usage["account_key"]
-        requested_start = int(datetime.fromisoformat(
-            weekly_usage["window_started_at"].replace("Z", "+00:00")
-        ).timestamp()) if weekly_usage else now - 7 * 86400
+    def read_period_attribution(self, sessions, nodes, window):
+        with self._lock, self._connect_monitor() as db:
+            repository = UsageRepository(db)
+            events = repository.verified_sessions(window)
+            baselines = repository.first_snapshots(window)
+        return attribute_sessions(sessions, {node["key"] for node in nodes}, window, events, baselines)
 
+    def read_usage_reconciliation(
+        self, all_sessions, nodes, account_usage, weekly_usage, now,
+        weekly_attribution=None,
+    ) -> dict[str, Any] | None:
+        if not account_usage or account_usage.get("summary", {}).get("lifetime_tokens") is None:
+            return None
+        lifetime = int(account_usage["summary"]["lifetime_tokens"])
+        attributed_total = sum(max(0, int(session.get("tokens") or 0)) for session in all_sessions)
+        lifetime_difference = lifetime - attributed_total
+        window = UsageWindow.weekly(weekly_usage, now) if weekly_usage else UsageWindow(now - 7 * 86400, now)
         with self._lock, self._connect_monitor() as db:
             account_rows = db.execute(
                 """SELECT sampled_at, lifetime_tokens FROM account_token_samples
-                   WHERE account_key = ? AND sampled_at >= ? ORDER BY sampled_at""",
-                (account_key, requested_start),
+                   WHERE account_key = ? AND sampled_at >= ? AND sampled_at <= ? ORDER BY sampled_at""",
+                (account_usage["account_key"], window.start, window.end),
             ).fetchall()
-            baselines_before = {
-                row["session_key"]: row["tokens_used"]
-                for row in db.execute(
-                    """SELECT sample.session_key, sample.tokens_used
-                       FROM session_samples AS sample JOIN (
-                           SELECT session_key, MAX(observed_at) AS observed_at
-                           FROM session_samples WHERE observed_at <= ? GROUP BY session_key
-                       ) AS baseline ON baseline.session_key=sample.session_key
-                       AND baseline.observed_at=sample.observed_at""",
-                    (account_rows[0]["sampled_at"] if account_rows else requested_start,),
-                )
-            }
-            baselines_after = {
-                row["session_key"]: row["tokens_used"]
-                for row in db.execute(
-                    """SELECT sample.session_key, sample.tokens_used
-                       FROM session_samples AS sample JOIN (
-                           SELECT session_key, MIN(observed_at) AS observed_at
-                           FROM session_samples WHERE observed_at >= ? GROUP BY session_key
-                       ) AS baseline ON baseline.session_key=sample.session_key
-                       AND baseline.observed_at=sample.observed_at""",
-                    (account_rows[0]["sampled_at"] if account_rows else requested_start,),
-                )
-            }
-            weekly_baselines_before = {
-                row["session_key"]: row["tokens_used"]
-                for row in db.execute(
-                    """SELECT sample.session_key, sample.tokens_used
-                       FROM session_samples AS sample JOIN (
-                           SELECT session_key, MAX(observed_at) AS observed_at
-                           FROM session_samples WHERE observed_at <= ? GROUP BY session_key
-                       ) AS baseline ON baseline.session_key=sample.session_key
-                       AND baseline.observed_at=sample.observed_at""",
-                    (requested_start,),
-                )
-            }
-            weekly_baselines_after = {
-                row["session_key"]: (row["tokens_used"], row["observed_at"])
-                for row in db.execute(
-                    """SELECT sample.session_key, sample.tokens_used, sample.observed_at
-                       FROM session_samples AS sample JOIN (
-                           SELECT session_key, MIN(observed_at) AS observed_at
-                           FROM session_samples WHERE observed_at >= ? GROUP BY session_key
-                       ) AS baseline ON baseline.session_key=sample.session_key
-                       AND baseline.observed_at=sample.observed_at""",
-                    (requested_start,),
-                )
-            }
-            verified_weekly_by_node = {
-                row["node_key"]: int(row["tokens"] or 0)
-                for row in db.execute(
-                    """SELECT node_key, SUM(tokens_used) AS tokens
-                       FROM collector_session_usage WHERE bucket_at >= ? AND bucket_at <= ?
-                       GROUP BY node_key""",
-                    (requested_start, now),
-                )
-            }
-
         coverage_start = account_rows[0]["sampled_at"] if account_rows else None
-        account_period_tokens = max(0, int(lifetime) - account_rows[0]["lifetime_tokens"]) if account_rows else 0
-        session_period_by_key: dict[str, int] = {}
-        for session in all_sessions:
-            current = max(0, int(session.get("tokens") or 0))
-            if coverage_start is None:
-                delta = 0
-            elif int(session.get("created_at") or 0) >= coverage_start:
-                delta = current
-            else:
-                baseline = baselines_before.get(session["key"], baselines_after.get(session["key"], current))
-                delta = max(0, current - baseline)
-            session_period_by_key[session["key"]] = delta
-        tracked_period_tokens = sum(session_period_by_key.values())
+        account_period_tokens = max(0, lifetime - account_rows[0]["lifetime_tokens"]) if account_rows else 0
+        period_attribution = self.read_period_attribution(
+            all_sessions, nodes, UsageWindow(coverage_start, window.end),
+        ) if coverage_start is not None else {}
+        period_users = aggregate_users(period_attribution)
+        tracked_period_tokens = sum(item["tokens"] for item in period_users)
         period_difference = account_period_tokens - tracked_period_tokens
-
-        node_meta = {node["key"]: node for node in nodes}
-        node_tokens: dict[str, int] = {node["key"]: 0 for node in nodes}
-        node_maximum_tokens: dict[str, int] = {node["key"]: 0 for node in nodes}
-        node_total_tokens: dict[str, int] = {node["key"]: 0 for node in nodes}
-        node_partial_sessions: dict[str, int] = {node["key"]: 0 for node in nodes}
-        node_coverage_starts: dict[str, list[int]] = {node["key"]: [] for node in nodes}
-        node_sessions: dict[str, int] = {node["key"]: 0 for node in nodes}
-        for session in all_sessions:
-            node_key = session["node_key"]
-            current = max(0, int(session.get("tokens") or 0))
-            created_at = int(session.get("created_at") or 0)
-            updated_at = int(session.get("updated_at") or 0)
-            baseline_before = weekly_baselines_before.get(session["key"])
-            baseline_after = weekly_baselines_after.get(session["key"])
-            partial = False
-            possible_unobserved = 0
-            if created_at >= requested_start:
-                weekly_tokens = current
-            elif baseline_before is not None:
-                weekly_tokens = max(0, current - baseline_before)
-            elif baseline_after is not None:
-                weekly_tokens = max(0, current - baseline_after[0])
-                if updated_at >= requested_start:
-                    partial = True
-                    possible_unobserved = min(current, max(0, int(baseline_after[0])))
-                    node_coverage_starts.setdefault(node_key, []).append(int(baseline_after[1]))
-            else:
-                weekly_tokens = 0
-                if updated_at >= requested_start:
-                    partial = True
-                    possible_unobserved = current
-            node_tokens[node_key] = node_tokens.get(node_key, 0) + weekly_tokens
-            node_maximum_tokens[node_key] = (
-                node_maximum_tokens.get(node_key, 0) + weekly_tokens + possible_unobserved
-            )
-            node_total_tokens[node_key] = node_total_tokens.get(node_key, 0) + current
-            if partial:
-                node_partial_sessions[node_key] = node_partial_sessions.get(node_key, 0) + 1
-            node_sessions[node_key] = node_sessions.get(node_key, 0) + 1
-        compared_keys = [key for key in node_tokens if key in node_meta]
-        for node_key, verified_tokens in verified_weekly_by_node.items():
-            if node_key in node_tokens:
-                node_tokens[node_key] = max(node_tokens[node_key], verified_tokens)
-                node_maximum_tokens[node_key] = max(node_maximum_tokens[node_key], node_tokens[node_key])
-        compared_weekly_tokens = sum(node_tokens[key] for key in compared_keys)
-        average = compared_weekly_tokens / len(compared_keys) if compared_keys else 0
+        if weekly_attribution is None:
+            weekly_attribution = self.read_period_attribution(all_sessions, nodes, window)
+        weekly_users = {item["node_key"]: item["tokens"] for item in aggregate_users(weekly_attribution)}
+        compared_weekly_tokens = sum(weekly_users.values())
+        average = compared_weekly_tokens / len(nodes) if nodes else 0
         comparison = []
-        for node_key in compared_keys:
-            node = node_meta[node_key]
-            tokens = node_tokens[node_key]
-            maximum_tokens = node_maximum_tokens.get(node_key, tokens)
+        for node in nodes:
+            key = node["key"]
+            amounts = [amount for (node_key, _), amount in weekly_attribution.items() if node_key == key]
+            node_sessions = [session for session in all_sessions if session["node_key"] == key]
+            tokens = weekly_users.get(key, 0)
+            maximum = sum(item.maximum_tokens for item in amounts)
+            partial = [item for item in amounts if item.maximum_tokens > item.tokens]
             ratio = tokens / average if average > 0 else 0.0
-            status = "high" if len(compared_keys) > 1 and ratio >= 1.5 else (
-                "low" if len(compared_keys) > 1 and ratio <= 0.5 else "normal"
+            status = "high" if len(nodes) > 1 and ratio >= 1.5 else (
+                "low" if len(nodes) > 1 and ratio <= 0.5 else "normal"
             )
             comparison.append({
-                "node_key": node_key,
-                "hostname": node["hostname"],
-                "os_user": node["os_user"],
+                "node_key": key, "hostname": node["hostname"], "os_user": node["os_user"],
                 "display_name": node.get("display_name") or node["os_user"],
-                "tokens": tokens,
-                "maximum_tokens": maximum_tokens,
-                "attributed_total_tokens": node_total_tokens.get(node_key, 0),
-                "partial": maximum_tokens > tokens,
-                "partial_session_count": node_partial_sessions.get(node_key, 0),
-                "coverage_started_at": (
-                    utc_iso(min(node_coverage_starts.get(node_key, [])))
-                    if node_coverage_starts.get(node_key) else utc_iso(requested_start)
-                ),
-                "verified_event_tokens": verified_weekly_by_node.get(node_key, 0),
+                "tokens": tokens, "maximum_tokens": maximum,
+                "attributed_total_tokens": sum(session["tokens"] for session in node_sessions),
+                "partial": maximum > tokens, "partial_session_count": len(partial),
+                "coverage_started_at": utc_iso(min((item.coverage_start for item in partial), default=window.start)),
+                "verified_event_tokens": sum(item.event_tokens for item in amounts),
+                "snapshot_only_tokens": sum(item.snapshot_only_tokens for item in amounts),
                 "share_percent": tokens / compared_weekly_tokens * 100 if compared_weekly_tokens else 0.0,
-                "average_ratio": ratio,
-                "status": status,
-                "session_count": node_sessions.get(node_key, 0),
+                "average_ratio": ratio, "status": status, "session_count": len(node_sessions),
                 "seen_at": utc_iso(node["seen_at"]),
             })
-        comparison.sort(key=lambda item: item["tokens"], reverse=True)
-
-        stale_nodes = [
-            node for node in nodes
-            if now - int(node["seen_at"]) > max(90, self.config.interval * 6)
-        ]
+        comparison.sort(key=lambda item: (-item["tokens"], item["node_key"]))
+        stale_nodes = [node for node in nodes if now - int(node["seen_at"]) > max(90, self.config.interval * 6)]
         reasons = []
         if lifetime_difference > 0:
             reasons.append("수집기 설치 전 또는 세션 DB에 남지 않은 계정 사용량이 있습니다.")
-        if coverage_start is None or coverage_start > requested_start + 60:
+        if coverage_start is None or coverage_start > window.start + 60:
             reasons.append("현재 주기 시작부터 서버 관측 시작 전까지는 증감 대조가 불가능합니다.")
         if period_difference > 0:
             reasons.append("관측 구간에 수집기 미설치 장비, 중지 구간 또는 세션에 귀속되지 않은 사용량이 있습니다.")
@@ -906,41 +831,71 @@ class UsageStore:
             reasons.append(f"최근 보고가 지연된 수집 노드가 {len(stale_nodes)}개 있습니다.")
         return {
             "lifetime": {
-                "account_tokens": int(lifetime),
-                "attributed_session_tokens": attributed_total,
+                "account_tokens": lifetime, "attributed_session_tokens": attributed_total,
                 "difference_tokens": lifetime_difference,
-                "coverage_percent": min(100.0, attributed_total / int(lifetime) * 100) if lifetime else None,
+                "coverage_percent": min(100.0, attributed_total / lifetime * 100) if lifetime else None,
             },
             "period": {
-                "requested_started_at": utc_iso(requested_start),
+                "requested_started_at": utc_iso(window.start),
                 "coverage_started_at": utc_iso(coverage_start) if coverage_start is not None else None,
-                "account_tokens": account_period_tokens,
-                "attributed_session_tokens": tracked_period_tokens,
-                "difference_tokens": period_difference,
-                "coverage_percent": (
-                    min(100.0, tracked_period_tokens / account_period_tokens * 100)
-                    if account_period_tokens > 0 else None
-                ),
+                "account_sample_count": len(account_rows), "account_tokens": account_period_tokens,
+                "attributed_session_tokens": tracked_period_tokens, "difference_tokens": period_difference,
+                "untracked_tokens": max(0, period_difference), "over_attributed_tokens": max(0, -period_difference),
+                "participant_count": len(period_users), "user_tokens": period_users,
+                "coverage_percent": min(100.0, tracked_period_tokens / account_period_tokens * 100) if account_period_tokens > 0 else None,
             },
-            "node_comparison": comparison,
-            "reasons": reasons,
+            "node_comparison": comparison, "reasons": reasons,
         }
 
-    def read_verified_session_usage(
-        self, started_at: int, ended_at: int,
-    ) -> dict[tuple[str, str], int]:
+    def read_weekly_token_breakdown(
+        self, account_usage, weekly, nodes, reconciliation, now, attribution=None,
+    ) -> dict[str, Any] | None:
+        if not account_usage or not weekly:
+            return None
+        window = UsageWindow.weekly(weekly, now)
+        if attribution is None:
+            _, sessions = self.read_current_sessions(now)
+            attribution = self.read_period_attribution(sessions, nodes, window)
+        return build_weekly_breakdown(account_usage, window, attribution, (reconciliation or {}).get("period") or {})
+
+    def read_verified_session_usage(self, started_at: int, ended_at: int) -> dict[tuple[str, str], int]:
         with self._lock, self._connect_monitor() as db:
-            rows = db.execute(
-                """SELECT node_key, session_key, SUM(tokens_used) AS tokens
-                   FROM collector_session_usage
-                   WHERE bucket_at >= ? AND bucket_at <= ?
-                   GROUP BY node_key, session_key""",
-                (started_at, ended_at),
-            ).fetchall()
-        return {
-            (row["node_key"], row["session_key"]): int(row["tokens"] or 0)
-            for row in rows
-        }
+            return UsageRepository(db).verified_sessions(UsageWindow(started_at, ended_at))
+
+    def read_daily_user_trend(
+        self, nodes: list[dict[str, Any]], now: int,
+    ) -> dict[str, Any]:
+        """Aggregate confirmed session events into 14 local calendar days."""
+        today = datetime.fromtimestamp(now).date()
+        first_day = today - timedelta(days=13)
+        start_at = int(datetime.combine(first_day, datetime_time.min).timestamp())
+        visible_nodes = {node["key"] for node in nodes}
+        days = []
+        by_date = {}
+        for offset in range(14):
+            day = first_day + timedelta(days=offset)
+            item = {
+                "date": day.isoformat(),
+                "day_type": "weekend" if day.weekday() >= 5 else "weekday",
+                "total_tokens": 0,
+                "users": {},
+            }
+            days.append(item)
+            by_date[item["date"]] = item
+        with self._lock, self._connect_monitor() as db:
+            rows = UsageRepository(db).daily_events(UsageWindow(start_at, now))
+        for row in rows:
+            if row["node_key"] not in visible_nodes:
+                continue
+            day = by_date.get(row["usage_date"])
+            if day is None:
+                continue
+            tokens = int(row["tokens"])
+            day["total_tokens"] += tokens
+            day["users"][row["node_key"]] = day["users"].get(row["node_key"], 0) + tokens
+        for day in days:
+            day["users"] = dict(sorted(day["users"].items()))
+        return {"timezone": datetime.fromtimestamp(now).astimezone().tzname(), "days": days}
 
     def read_remote(
         self, include_local: bool = False,
@@ -991,6 +946,22 @@ class UsageStore:
         ]
         return clean_nodes, clean_sessions
 
+    def read_current_sessions(
+        self, now: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        nodes, sessions = self.read_remote(include_local=True)
+        if any(node["key"] == self.local_node_key() for node in nodes):
+            return nodes, sessions
+        try:
+            local_sessions = self.read_sessions()
+        except FileNotFoundError:
+            local_sessions = []
+        local_node = {
+            "key": self.local_node_key(), "hostname": socket.gethostname(),
+            "os_user": getpass.getuser(), "seen_at": now, "account": self.read_account(),
+        }
+        return [local_node] + nodes, local_sessions + sessions
+
     def read_aliases(self) -> dict[str, str]:
         with self._lock, self._connect_monitor() as db:
             return {row["node_key"]: row["display_name"] for row in db.execute(
@@ -1021,8 +992,7 @@ class UsageStore:
 
     def collect(self, now: int | None = None) -> None:
         now = int(now or time.time())
-        _, remote_sessions = self.read_remote()
-        sessions = self.read_sessions() + remote_sessions
+        _, sessions = self.read_current_sessions(now)
         visible = [session for session in sessions if not session["archived"]]
         active = sum(now - session["updated_at"] <= self.config.active_window for session in visible)
         session_tokens = sum(session["tokens"] for session in visible)
@@ -1041,12 +1011,13 @@ class UsageStore:
             db.executemany(
                 """
                 INSERT OR REPLACE INTO session_samples
-                    (observed_at, session_key, project_key, model, tokens_used, updated_at, archived)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (observed_at, node_key, session_key, project_key, model, tokens_used, updated_at, archived)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         now,
+                        session["node_key"],
                         session["key"],
                         session["project_key"],
                         session["model"],
@@ -1063,12 +1034,7 @@ class UsageStore:
 
     def dashboard(self, now: int | None = None) -> dict[str, Any]:
         now = int(now or time.time())
-        collector_nodes, collector_sessions = self.read_remote(include_local=True)
-        has_local_collector = any(node["key"] == self.local_node_key() for node in collector_nodes)
-        if has_local_collector:
-            all_sessions = collector_sessions
-        else:
-            all_sessions = self.read_sessions() + collector_sessions
+        nodes, all_sessions = self.read_current_sessions(now)
         sessions = [session for session in all_sessions if not session["archived"]]
         history_cutoff = now - 24 * 60 * 60
         with self._lock, self._connect_monitor() as db:
@@ -1082,18 +1048,18 @@ class UsageStore:
                 (history_cutoff,),
             ).fetchall()
             previous = {
-                row["session_key"]: row["tokens_used"]
+                (row["node_key"], row["session_key"]): row["tokens_used"]
                 for row in db.execute(
                     """
-                    SELECT sample.session_key, sample.tokens_used
+                    SELECT sample.node_key, sample.session_key, sample.tokens_used
                     FROM session_samples AS sample
                     JOIN (
-                        SELECT session_key, MAX(observed_at) AS observed_at
+                        SELECT node_key, session_key, MAX(observed_at) AS observed_at
                         FROM session_samples
                         WHERE observed_at < ?
-                        GROUP BY session_key
+                        GROUP BY node_key, session_key
                     ) AS prior
-                    ON prior.session_key = sample.session_key
+                    ON prior.node_key = sample.node_key AND prior.session_key = sample.session_key
                     AND prior.observed_at = sample.observed_at
                     """,
                     (now - self.config.interval,),
@@ -1102,45 +1068,42 @@ class UsageStore:
 
         for session in sessions:
             session["active"] = now - session["updated_at"] <= self.config.active_window
-            session["delta"] = max(0, session["tokens"] - previous.get(session["key"], session["tokens"]))
+            session["delta"] = max(0, session["tokens"] - previous.get(
+                (session["node_key"], session["key"]), session["tokens"],
+            ))
 
         session_total = sum(session["tokens"] for session in sessions)
         account_usage = self.read_account_usage()
         lifetime_tokens = (account_usage or {}).get("summary", {}).get("lifetime_tokens")
-        if has_local_collector:
-            nodes = collector_nodes
-        else:
-            local_node = {
-                "key": self.local_node_key(),
-                "hostname": socket.gethostname(),
-                "os_user": getpass.getuser(),
-                "seen_at": now,
-                "account": self.read_account(),
-            }
-            nodes = [local_node] + collector_nodes
         aliases = self.read_aliases()
         for node in nodes:
             node["display_name"] = aliases.get(node["key"], node["os_user"])
+        daily_user_trend = self.read_daily_user_trend(nodes, now)
         names = {node["key"]: node["display_name"] for node in nodes}
         for session in sessions:
             session["display_user"] = names.get(session["node_key"], session["os_user"])
         weekly_usage = self.read_weekly_usage_history(account_usage, now)
-        verified_session_usage: dict[tuple[str, str], int] = {}
+        weekly_attribution = {}
         if weekly_usage:
-            weekly_started_at = int(datetime.fromisoformat(
-                weekly_usage["window_started_at"].replace("Z", "+00:00")
-            ).timestamp())
-            verified_session_usage = self.read_verified_session_usage(weekly_started_at, now)
-        for session in sessions:
-            session["verified_weekly_tokens"] = verified_session_usage.get(
-                (session["node_key"], session["key"])
+            weekly_attribution = self.read_period_attribution(
+                all_sessions, nodes, UsageWindow.weekly(weekly_usage, now),
             )
+        for session in sessions:
+            usage = weekly_attribution.get((session["node_key"], session["key"]))
+            session["weekly_tokens"] = usage.tokens if usage is not None else None
+            session["verified_weekly_tokens"] = usage.event_tokens if usage is not None else None
+            session["weekly_snapshot_only_tokens"] = usage.snapshot_only_tokens if usage is not None else None
         reconciliation = self.read_usage_reconciliation(
-            all_sessions, nodes, account_usage, weekly_usage, now,
+            all_sessions, nodes, account_usage, weekly_usage, now, weekly_attribution if weekly_usage else None,
+        )
+        weekly_token_breakdown = self.read_weekly_token_breakdown(
+            account_usage, weekly_usage, nodes, reconciliation, now, weekly_attribution,
         )
         weekly_account_tokens = (
-            reconciliation["period"]["account_tokens"] if reconciliation is not None else None
+            weekly_token_breakdown["account_tokens"] if weekly_token_breakdown is not None else None
         )
+        with self._lock, self._connect_monitor() as db:
+            analytics = read_analytics(db, account_usage, weekly_usage, all_sessions, nodes, now, weekly_token_breakdown)
         for session in sessions:
             session["created_at"] = utc_iso(session["created_at"])
             session["updated_at"] = utc_iso(session["updated_at"])
@@ -1177,6 +1140,10 @@ class UsageStore:
             "nodes": nodes,
             "account_usage": account_usage,
             "weekly_usage": weekly_usage,
+            "weekly_token_breakdown": weekly_token_breakdown,
+            "weekly_user_tokens": aggregate_users(weekly_attribution) if weekly_usage else None,
+            "daily_user_trend": daily_user_trend,
+            "analytics": analytics,
             "reconciliation": reconciliation,
             "history": [
                 {
@@ -1235,6 +1202,13 @@ def build_handler(store: UsageStore, collector: Collector):
         def log_message(self, format: str, *args: Any) -> None:
             print(f"[{self.log_date_time_string()}] {format % args}")
 
+        def end_headers(self) -> None:
+            # HTML and scripts must revalidate together after a deployment,
+            # including conditional 304 responses for unchanged assets.
+            if not urlparse(self.path).path.startswith("/api/"):
+                self.send_header("Cache-Control", "no-cache, max-age=0, must-revalidate")
+            super().end_headers()
+
         def send_json(
             self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK,
             response_token: str | None = None,
@@ -1260,8 +1234,8 @@ def build_handler(store: UsageStore, collector: Collector):
                 username, password = decoded.split(":", 1)
             except (ValueError, UnicodeDecodeError):
                 return False
-            return hmac.compare_digest(username, store.dashboard_user) and hmac.compare_digest(
-                password, store.dashboard_password
+            return hmac.compare_digest(username.encode(), store.dashboard_user.encode()) and hmac.compare_digest(
+                password.encode(), store.dashboard_password.encode()
             )
 
         def request_dashboard_login(self) -> None:
@@ -1325,6 +1299,8 @@ def build_handler(store: UsageStore, collector: Collector):
                 self.send_json({"error": str(error)}, HTTPStatus.UNAUTHORIZED)
             except (ValueError, TypeError, json.JSONDecodeError) as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            except (OSError, sqlite3.Error) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
 
         def do_PUT(self) -> None:
             path = urlparse(self.path).path
@@ -1340,6 +1316,8 @@ def build_handler(store: UsageStore, collector: Collector):
                 if size <= 0 or size > 4096:
                     raise ValueError("invalid payload size")
                 payload = json.loads(self.rfile.read(size))
+                if not isinstance(payload, dict):
+                    raise ValueError("invalid alias payload")
                 display_name = payload.get("display_name")
                 if not isinstance(display_name, str):
                     raise ValueError("display_name must be a string")
