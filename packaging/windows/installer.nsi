@@ -2,6 +2,7 @@ Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "x64.nsh"
+!include "nsDialogs.nsh"
 
 !ifndef APP_VERSION
   !error "APP_VERSION is required"
@@ -37,11 +38,16 @@ SetCompressor /SOLID lzma
 ShowInstDetails show
 ShowUninstDetails show
 BrandingText "Codex Usage Monitor"
+Var ServerAddress
+Var ServerDialog
+Var ServerInput
+Var LegacyAccountKey
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
 !define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
 !insertmacro MUI_PAGE_WELCOME
+Page custom ServerPageCreate ServerPageLeave
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -50,8 +56,44 @@ BrandingText "Codex Usage Monitor"
 !insertmacro MUI_LANGUAGE "English"
 
 Function .onInit
+  SetRegView 64
+  StrCpy $ServerAddress "${SERVER_URL}"
+  StrCpy $LegacyAccountKey "${TARGET_ACCOUNT_KEY}"
+  ReadRegStr $0 HKLM "Software\CodexUsageCollector" "Server"
+  ${If} $0 != ""
+    StrCpy $ServerAddress $0
+  ${EndIf}
+  ReadRegStr $0 HKLM "Software\CodexUsageCollector" "AccountKey"
+  ${If} $0 != ""
+    StrCpy $LegacyAccountKey $0
+  ${EndIf}
   ${IfNot} ${RunningX64}
     MessageBox MB_ICONSTOP "Codex Usage Collector requires 64-bit Windows."
+    Abort
+  ${EndIf}
+FunctionEnd
+
+Function ServerPageCreate
+  !insertmacro MUI_HEADER_TEXT "Monitoring server" "Choose where this collector sends usage. You can change this later."
+  nsDialogs::Create 1018
+  Pop $ServerDialog
+  ${If} $ServerDialog == error
+    Abort
+  ${EndIf}
+  ${NSD_CreateLabel} 0 0 100% 32u "Central server URL (http:// or https://). The server must accept the collector token included with this installer."
+  Pop $0
+  ${NSD_CreateText} 0 40u 100% 14u "$ServerAddress"
+  Pop $ServerInput
+  nsDialogs::Show
+FunctionEnd
+
+Function ServerPageLeave
+  ${NSD_GetText} $ServerInput $ServerAddress
+  StrCpy $0 $ServerAddress 7
+  StrCpy $1 $ServerAddress 8
+  ${If} $0 != "http://"
+  ${AndIf} $1 != "https://"
+    MessageBox MB_ICONEXCLAMATION "Enter an HTTP(S) server URL."
     Abort
   ${EndIf}
 FunctionEnd
@@ -72,6 +114,9 @@ Section "Machine-wide collector" SecMain
   File "${SOURCE_DIR}\collector.py"
   File "${SOURCE_DIR}\collector_windows_machine.py"
   File "${SOURCE_DIR}\packaging\windows\register_machine_task.ps1"
+  File "${SOURCE_DIR}\packaging\windows\configure.ps1"
+  File "${SOURCE_DIR}\packaging\windows\configure.cmd"
+  CreateShortCut "$SMPROGRAMS\Codex Usage Collector Settings.lnk" "$INSTDIR\configure.cmd"
 
   CreateDirectory "$APPDATA\CodexUsageCollector"
   SetOutPath "$APPDATA\CodexUsageCollector"
@@ -80,8 +125,8 @@ Section "Machine-wide collector" SecMain
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKLM "Software\CodexUsageCollector" "InstallDir" "$INSTDIR"
-  WriteRegStr HKLM "Software\CodexUsageCollector" "Server" "${SERVER_URL}"
-  WriteRegStr HKLM "Software\CodexUsageCollector" "AccountKey" "${TARGET_ACCOUNT_KEY}"
+  WriteRegStr HKLM "Software\CodexUsageCollector" "Server" "$ServerAddress"
+  WriteRegStr HKLM "Software\CodexUsageCollector" "AccountKey" "$LegacyAccountKey"
   WriteRegDWORD HKLM "Software\CodexUsageCollector" "LogMaxBytes" 5242880
   WriteRegDWORD HKLM "Software\CodexUsageCollector" "LogBackups" 3
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexUsageCollector" "DisplayName" "Codex Usage Collector"
@@ -92,11 +137,10 @@ Section "Machine-wide collector" SecMain
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexUsageCollector" "NoRepair" 1
 
   nsExec::ExecToLog 'netsh.exe advfirewall firewall delete rule name="Codex Usage Collector outbound"'
-  nsExec::ExecToLog 'netsh.exe advfirewall firewall add rule name="Codex Usage Collector outbound" dir=out action=allow program="$INSTDIR\runtime\pythonw.exe" enable=yes profile=any protocol=TCP remoteport=${SERVER_PORT}'
 
   ; NSIS is a 32-bit process. Sysnative launches 64-bit PowerShell so it reads
   ; the same 64-bit HKLM registry view written above.
-  nsExec::ExecToStack '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\register_machine_task.ps1"'
+  nsExec::ExecToStack '"$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\register_machine_task.ps1" -UpdateConnection'
   Pop $0
   Pop $1
   ${If} $0 != 0
@@ -113,6 +157,7 @@ Section "Uninstall"
   nsExec::ExecToLog 'netsh.exe advfirewall firewall delete rule name="Codex Usage Collector outbound"'
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexUsageCollector"
   DeleteRegKey HKLM "Software\CodexUsageCollector"
+  Delete "$SMPROGRAMS\Codex Usage Collector Settings.lnk"
   RMDir /r "$INSTDIR"
   RMDir /r "$APPDATA\CodexUsageCollector"
 SectionEnd

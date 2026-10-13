@@ -191,7 +191,7 @@ class CollectorTest(unittest.TestCase):
             self.assertTrue(apply_collector_update(update, root))
             self.assertEqual(target.read_bytes(), content)
             self.assertEqual((root / "collector.py.previous").read_text(), "OLD = True\n")
-            self.assertEqual(COLLECTOR_VERSION, "0.6.1")
+            self.assertEqual(COLLECTOR_VERSION, "0.7.0")
 
     def test_app_server_snapshot_keeps_only_aggregate_usage(self):
         result = normalize_app_server_snapshot(

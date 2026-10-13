@@ -56,10 +56,11 @@ def main() -> None:
             ROOT / "deploy" / "codex-usage-collector.service": package / "codex-usage-collector.service",
             ROOT / "packaging" / "install.sh": package / "install.sh",
             ROOT / "packaging" / "uninstall.sh": package / "uninstall.sh",
+            ROOT / "packaging" / "configure.sh": package / "configure.sh",
         }
         for source, destination in copies.items():
             shutil.copy2(source, destination)
-        for executable in (package / "collector.py", package / "install.sh", package / "uninstall.sh"):
+        for executable in (package / "collector.py", package / "install.sh", package / "uninstall.sh", package / "configure.sh"):
             executable.chmod(0o755)
         (package / "bundle.conf").write_text(f"server={args.server}\naccount_key={account_key}\n")
         (package / "bundle.conf").chmod(0o644)

@@ -18,12 +18,14 @@ def next_month(day):
     return (day.replace(day=28) + timedelta(days=4)).replace(day=1)
 
 
-def read_events(db, window):
+def read_events(db, window, account_key=None):
+    clause = " AND account_key = ?" if account_key is not None else ""
+    args = (account_key,) if account_key is not None else ()
     return db.execute(
-        """SELECT node_key, session_key, date(bucket_at, 'unixepoch') AS date,
+        f"""SELECT node_key, session_key, date(bucket_at, 'unixepoch') AS date,
                   SUM(tokens_used) AS tokens
-           FROM collector_session_usage WHERE bucket_at >= ? AND bucket_at + 60 <= ?
-           GROUP BY node_key, session_key, date""", (window.start, window.end),
+           FROM collector_session_usage WHERE bucket_at >= ? AND bucket_at + 60 <= ? {clause}
+           GROUP BY node_key, session_key, date""", (window.start, window.end, *args),
     ).fetchall()
 
 
@@ -106,7 +108,7 @@ def calendar_report(start, end, now, account_days, events, sessions, visible, wi
     }
 
 
-def read_analytics(db, account_usage, weekly, sessions, nodes, now, weekly_breakdown=None):
+def read_analytics(db, account_usage, weekly, sessions, nodes, now, weekly_breakdown=None, account_key=None):
     today = date_of(now)
     account_days = {}
     for item in (account_usage or {}).get("daily_usage", []):
@@ -118,7 +120,7 @@ def read_analytics(db, account_usage, weekly, sessions, nodes, now, weekly_break
             continue
     visible = {node["key"] for node in nodes}
     cutoff = timestamp(today.replace(day=1) - timedelta(days=EVENT_RETENTION_DAYS))
-    events = read_events(db, UsageWindow(cutoff, now))
+    events = read_events(db, UsageWindow(cutoff, now), account_key)
     month_ids = {today.strftime("%Y-%m"), *(day[:7] for day in account_days)}
     month_ids.update(event["date"][:7] for event in events if event["node_key"] in visible)
     months = []
@@ -140,7 +142,7 @@ def read_analytics(db, account_usage, weekly, sessions, nodes, now, weekly_break
             if weekly_breakdown["basis"] == "observed_delta":
                 observed_days = observed_account_days(db, (account_usage or {}).get("account_key"), window)
         weekly_report = calendar_report(date_of(window.start), end, now, weekly_days,
-                                        read_events(db, window), sessions, visible, window, observed_days)
+                                        read_events(db, window, account_key), sessions, visible, window, observed_days)
         weekly_report["window_started_at"] = utc_iso(window.start)
         weekly_report["window_ended_at"] = utc_iso(window.end)
         if weekly_breakdown is not None:

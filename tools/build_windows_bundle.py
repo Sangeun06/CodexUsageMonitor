@@ -57,6 +57,8 @@ def main() -> None:
             ROOT / "packaging" / "windows" / "uninstall.ps1": package / "uninstall.ps1",
             ROOT / "packaging" / "windows" / "install.cmd": package / "install.cmd",
             ROOT / "packaging" / "windows" / "uninstall.cmd": package / "uninstall.cmd",
+            ROOT / "packaging" / "windows" / "configure.ps1": package / "configure.ps1",
+            ROOT / "packaging" / "windows" / "configure.cmd": package / "configure.cmd",
         }
         for source, destination in sources.items():
             shutil.copy2(source, destination)

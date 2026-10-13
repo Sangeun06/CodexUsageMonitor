@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 from contextlib import contextmanager
+from contextvars import ContextVar
 import getpass
 import hashlib
 import hmac
@@ -24,7 +25,9 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+from account_registry import initialize_accounts
 
 from collector import COLLECTOR_VERSION, read_app_server_usage
 from usage_analytics import EVENT_RETENTION_DAYS, read_analytics
@@ -64,11 +67,14 @@ class UsageStore:
     def __init__(self, config: Config):
         self.config = config
         self._lock = threading.Lock()
+        self._account_context = ContextVar("monitor_account", default=None)
         config.monitor_db.parent.mkdir(parents=True, exist_ok=True)
         self.collector_token = self._load_or_create_collector_token()
         self.dashboard_user = os.getenv("CODEX_DASHBOARD_USER", "admin")
         self.dashboard_password = self._load_or_create_dashboard_password()
         self._initialize_monitor_db()
+        with self._connect_monitor() as db:
+            initialize_accounts(db, self.read_account(self.collector_token))
 
     def _load_or_create_collector_token(self) -> str:
         env_token = os.getenv("CODEX_COLLECTOR_TOKEN")
@@ -304,12 +310,13 @@ class UsageStore:
         resets_at = str(weekly.get("resets_at") or "unknown")
         band = max(0, min(100, int(used // 10) * 10))
         alert_key = hashlib.sha256(
-            f"weekly-pace-150:{resets_at}:{band}:{target['node_key']}".encode()
+            f"weekly-pace-150:{self.collector_account_key()}:{resets_at}:{band}:{target['node_key']}".encode()
         ).hexdigest()[:24]
         share = float(target.get("share_percent") or 0)
         payload = {
             "id": alert_key,
             "kind": "weekly-pace-150",
+            "account_key": self.collector_account_key(),
             "severity": "warning",
             "title": "Codex 주간 사용 속도 경고",
             "message": (
@@ -331,10 +338,12 @@ class UsageStore:
                 return []
             rows = db.execute(
                 """SELECT alert_key, payload_json FROM collector_alerts
-                   WHERE node_key = ? AND delivered_at IS NULL ORDER BY created_at LIMIT 8""",
-                (node_key,),
+                   WHERE node_key = ? AND delivered_at IS NULL
+                   AND COALESCE(json_extract(payload_json, '$.account_key'), ?) = ?
+                   ORDER BY created_at LIMIT 8""",
+                (node_key, self.collector_account_key(), self.collector_account_key()),
             ).fetchall()
-        return [json.loads(row["payload_json"]) for row in rows]
+        return [item for row in rows if (item := json.loads(row["payload_json"])).get("account_key", self.collector_account_key()) == self.collector_account_key()]
 
     def collector_response(
         self, node_key: str, collector_info: Any, now: int | None = None,
@@ -379,7 +388,69 @@ class UsageStore:
             return empty
 
     def collector_account_key(self) -> str:
-        return self.read_account(self.collector_token)["key"]
+        selected = self._account_context.get()
+        if selected is not None:
+            return selected
+        with self._connect_monitor() as db:
+            row = db.execute("SELECT value FROM monitor_settings WHERE key='default_account'").fetchone()
+        return row[0] if row else "unknown"
+
+    @contextmanager
+    def account_scope(self, account_key):
+        token = self._account_context.set(account_key)
+        try:
+            yield
+        finally:
+            self._account_context.reset(token)
+
+    def accounts(self):
+        with self._lock, self._connect_monitor() as db:
+            registered = [dict(row) for row in db.execute("SELECT * FROM monitored_accounts ORDER BY created_at, account_key")]
+            candidates = [dict(row) for row in db.execute("SELECT * FROM discovered_accounts ORDER BY seen_at DESC")]
+            default = db.execute("SELECT value FROM monitor_settings WHERE key='default_account'").fetchone()
+        for row in registered + candidates:
+            row["account"] = json.loads(row.pop("account_json"))
+            if "enabled" in row:
+                row["enabled"] = bool(row["enabled"])
+        local = self.read_account(self.collector_token)
+        if local["key"] != "unknown" and not any(row["account_key"] == local["key"] for row in candidates):
+            candidates.insert(0, {"account_key": local["key"], "account": local, "seen_at": None})
+        return {"registered": registered, "discovered": candidates, "default_account_key": default[0] if default else None}
+
+    def save_account(self, account_key, label=None, enabled=True, make_default=False):
+        if not isinstance(account_key, str) or not re.fullmatch(r"[a-f0-9]{12}", account_key):
+            raise ValueError("account key must be 12 hexadecimal characters")
+        if not isinstance(enabled, bool) or not isinstance(make_default, bool):
+            raise ValueError("enabled and make_default must be booleans")
+        if label is not None and (not isinstance(label, str) or not label.strip() or len(label.strip()) > 120):
+            raise ValueError("label must contain 1 to 120 characters")
+        account = next((row["account"] for row in self.accounts()["discovered"] if row["account_key"] == account_key), {"key": account_key})
+        with self._lock, self._connect_monitor() as db:
+            existing = db.execute("SELECT * FROM monitored_accounts WHERE account_key=?", (account_key,)).fetchone()
+            display = label.strip() if label is not None else (existing["label"] if existing else account.get("email") or account.get("name") or account_key)
+            db.execute("""INSERT INTO monitored_accounts VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_key) DO UPDATE SET label=excluded.label, enabled=excluded.enabled""",
+                (account_key, display, json.dumps(account), int(enabled), int(time.time())))
+            if make_default or not db.execute("SELECT 1 FROM monitor_settings WHERE key='default_account'").fetchone():
+                db.execute("INSERT OR REPLACE INTO monitor_settings VALUES ('default_account', ?)", (account_key,))
+
+    def discover_account(self, payload):
+        if not isinstance(payload, dict) or not isinstance(payload.get("account"), dict):
+            raise ValueError("invalid account discovery")
+        account = payload["account"]
+        key = account.get("key")
+        if key != "unknown":
+            if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{12}", key):
+                raise ValueError("invalid account key")
+            clean = {field: str(account[field])[:120] for field in ("key", "name", "email", "plan")
+                     if isinstance(account.get(field), str)}
+            with self._lock, self._connect_monitor() as db:
+                db.execute("""INSERT INTO discovered_accounts VALUES (?, ?, ?)
+                    ON CONFLICT(account_key) DO UPDATE SET account_json=excluded.account_json, seen_at=excluded.seen_at""",
+                    (key, json.dumps(clean), int(time.time())))
+        registered = self.accounts()["registered"]
+        return {"tracked_accounts": [row["account_key"] for row in registered],
+                "monitored_accounts": [row["account_key"] for row in registered if row["enabled"]]}
 
     def local_node_key(self) -> str:
         return hashlib.sha256(f"{socket.gethostname()}:{getpass.getuser()}".encode()).hexdigest()[:12]
@@ -430,9 +501,12 @@ class UsageStore:
         clean_account = {
             field: account.get(field)
             for field in ("key", "name", "email", "email_verified", "plan", "auth_provider", "auth_mode")
+            if account.get(field) is not None
         }
-        target_account_key = self.collector_account_key()
-        if target_account_key != "unknown" and clean_account.get("key") != target_account_key:
+        account_key = clean_account.get("key")
+        with self._lock, self._connect_monitor() as db:
+            allowed = db.execute("SELECT 1 FROM monitored_accounts WHERE account_key=? AND enabled=1", (account_key,)).fetchone()
+        if not allowed:
             raise ValueError("account is not registered for this monitor")
         raw_receipts = payload.get("alert_receipts") or []
         if not isinstance(raw_receipts, list) or len(raw_receipts) > 200:
@@ -479,19 +553,23 @@ class UsageStore:
                    os_user=excluded.os_user, account_json=excluded.account_json, seen_at=excluded.seen_at""",
                 (node["key"][:64], node["hostname"][:120], node["os_user"][:120], json.dumps(clean_account), now),
             )
-            db.execute("DELETE FROM collector_sessions WHERE node_key = ?", (node["key"],))
+            db.execute("""INSERT INTO collector_node_accounts VALUES (?, ?, ?, ?)
+                ON CONFLICT(account_key, node_key) DO UPDATE SET
+                account_json=json_patch(collector_node_accounts.account_json, excluded.account_json), seen_at=excluded.seen_at""",
+                (account_key, node["key"], json.dumps(clean_account), now))
+            db.execute("DELETE FROM collector_sessions WHERE node_key = ? AND account_key=?", (node["key"], account_key))
             db.executemany(
                 """INSERT INTO collector_sessions
-                   (node_key, session_key, project_key, project_name, model, tokens_used, created_at, updated_at, archived)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                clean_sessions,
+                   (node_key, session_key, project_key, project_name, model, tokens_used, created_at, updated_at, archived, account_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(*session, account_key) for session in clean_sessions],
             )
             db.executemany(
                 """INSERT INTO collector_session_usage
-                   (node_key, session_key, bucket_at, tokens_used) VALUES (?, ?, ?, ?)
-                   ON CONFLICT(node_key, session_key, bucket_at) DO UPDATE SET
+                   (node_key, session_key, bucket_at, tokens_used, account_key) VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(account_key, node_key, session_key, bucket_at) DO UPDATE SET
                    tokens_used=MAX(tokens_used, excluded.tokens_used)""",
-                clean_usage_buckets,
+                [(*bucket, account_key) for bucket in clean_usage_buckets],
             )
             db.execute(
                 "DELETE FROM collector_session_usage WHERE bucket_at < ?",
@@ -644,8 +722,8 @@ class UsageStore:
 
     def store_local_account_usage(self, usage: dict[str, Any], now: int | None = None) -> None:
         now = int(now or time.time())
-        account_key = self.collector_account_key()
-        if account_key == "unknown":
+        account_key = self.read_account(self.collector_token)["key"]
+        if not any(row["account_key"] == account_key and row["enabled"] for row in self.accounts()["registered"]):
             raise RuntimeError("local Codex account is not registered")
         with self._lock, self._connect_monitor() as db:
             self._store_account_usage(db, account_key, self.local_node_key(), usage, now)
@@ -653,14 +731,7 @@ class UsageStore:
     def read_account_usage(self) -> dict[str, Any] | None:
         account_key = self.collector_account_key()
         with self._lock, self._connect_monitor() as db:
-            if account_key == "unknown":
-                row = db.execute(
-                    "SELECT * FROM account_usage ORDER BY received_at DESC LIMIT 1"
-                ).fetchone()
-            else:
-                row = db.execute(
-                    "SELECT * FROM account_usage WHERE account_key = ?", (account_key,)
-                ).fetchone()
+            row = db.execute("SELECT * FROM account_usage WHERE account_key = ?", (account_key,)).fetchone()
         if row is None:
             return None
         usage = json.loads(row["usage_json"])
@@ -757,9 +828,10 @@ class UsageStore:
 
     def read_period_attribution(self, sessions, nodes, window):
         with self._lock, self._connect_monitor() as db:
-            repository = UsageRepository(db)
+            repository = UsageRepository(db, self.collector_account_key())
             events = repository.verified_sessions(window)
-            baselines = repository.first_snapshots(window)
+            keys = {(session["node_key"], session["key"]) for session in sessions} | set(events)
+            baselines = repository.first_snapshots(window, keys)
         return attribute_sessions(sessions, {node["key"] for node in nodes}, window, events, baselines)
 
     def read_usage_reconciliation(
@@ -860,7 +932,7 @@ class UsageStore:
 
     def read_verified_session_usage(self, started_at: int, ended_at: int) -> dict[tuple[str, str], int]:
         with self._lock, self._connect_monitor() as db:
-            return UsageRepository(db).verified_sessions(UsageWindow(started_at, ended_at))
+            return UsageRepository(db, self.collector_account_key()).verified_sessions(UsageWindow(started_at, ended_at))
 
     def read_daily_user_trend(
         self, nodes: list[dict[str, Any]], now: int,
@@ -883,7 +955,7 @@ class UsageStore:
             days.append(item)
             by_date[item["date"]] = item
         with self._lock, self._connect_monitor() as db:
-            rows = UsageRepository(db).daily_events(UsageWindow(start_at, now))
+            rows = UsageRepository(db, self.collector_account_key()).daily_events(UsageWindow(start_at, now))
         for row in rows:
             if row["node_key"] not in visible_nodes:
                 continue
@@ -900,38 +972,18 @@ class UsageStore:
     def read_remote(
         self, include_local: bool = False,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        local_key = self.local_node_key()
+        account_key = self.collector_account_key()
         with self._lock, self._connect_monitor() as db:
-            if include_local:
-                nodes = db.execute(
-                    "SELECT node_key, hostname, os_user, account_json, seen_at FROM collector_nodes"
-                ).fetchall()
-                sessions = db.execute(
-                    """SELECT s.*, n.hostname, n.os_user, n.seen_at
-                       FROM collector_sessions s JOIN collector_nodes n ON n.node_key=s.node_key"""
-                ).fetchall()
-            else:
-                nodes = db.execute(
-                    """SELECT node_key, hostname, os_user, account_json, seen_at
-                       FROM collector_nodes WHERE node_key != ?""",
-                    (local_key,),
-                ).fetchall()
-                sessions = db.execute(
-                    """SELECT s.*, n.hostname, n.os_user, n.seen_at
-                       FROM collector_sessions s JOIN collector_nodes n ON n.node_key=s.node_key
-                       WHERE s.node_key != ?""",
-                    (local_key,),
-                ).fetchall()
+            nodes = db.execute("""SELECT n.node_key, n.hostname, n.os_user, a.account_json, a.seen_at
+                FROM collector_node_accounts a JOIN collector_nodes n USING(node_key)
+                WHERE a.account_key=?""", (account_key,)).fetchall()
+            sessions = db.execute("""SELECT s.*, n.hostname, n.os_user
+                FROM collector_sessions s JOIN collector_nodes n USING(node_key)
+                WHERE s.account_key=?""", (account_key,)).fetchall()
+        if not include_local:
+            nodes = [row for row in nodes if row["node_key"] != self.local_node_key()]
+            sessions = [row for row in sessions if row["node_key"] != self.local_node_key()]
         account_by_node = {row["node_key"]: json.loads(row["account_json"]) for row in nodes}
-        target_account_key = self.collector_account_key()
-        if target_account_key != "unknown":
-            account_by_node = {
-                node_key: account
-                for node_key, account in account_by_node.items()
-                if account.get("key") == target_account_key
-            }
-            nodes = [row for row in nodes if row["node_key"] in account_by_node]
-            sessions = [row for row in sessions if row["node_key"] in account_by_node]
         clean_nodes = [
             {"key": row["node_key"], "hostname": row["hostname"], "os_user": row["os_user"],
              "seen_at": row["seen_at"], "account": account_by_node[row["node_key"]]}
@@ -952,13 +1004,20 @@ class UsageStore:
         nodes, sessions = self.read_remote(include_local=True)
         if any(node["key"] == self.local_node_key() for node in nodes):
             return nodes, sessions
+        local_account = self.read_account(self.collector_token)
+        if local_account["key"] != self.collector_account_key():
+            return nodes, sessions
+        # The raw local database has no per-account counters. Once several
+        # targets exist, only the collector's attributed ledger is usable.
+        if len(self.accounts()["registered"]) > 1:
+            return nodes, sessions
         try:
             local_sessions = self.read_sessions()
         except FileNotFoundError:
             local_sessions = []
         local_node = {
             "key": self.local_node_key(), "hostname": socket.gethostname(),
-            "os_user": getpass.getuser(), "seen_at": now, "account": self.read_account(),
+            "os_user": getpass.getuser(), "seen_at": now, "account": local_account,
         }
         return [local_node] + nodes, local_sessions + sessions
 
@@ -991,6 +1050,12 @@ class UsageStore:
                 db.execute("DELETE FROM node_aliases WHERE node_key = ?", (node_key,))
 
     def collect(self, now: int | None = None) -> None:
+        for account in self.accounts()["registered"]:
+            if account["enabled"]:
+                with self.account_scope(account["account_key"]):
+                    self._collect_account(now)
+
+    def _collect_account(self, now: int | None = None) -> None:
         now = int(now or time.time())
         _, sessions = self.read_current_sessions(now)
         visible = [session for session in sessions if not session["archived"]]
@@ -1003,16 +1068,16 @@ class UsageStore:
             db.execute(
                 """
                 INSERT OR REPLACE INTO overview_samples
-                    (observed_at, total_tokens, session_count, active_count)
-                VALUES (?, ?, ?, ?)
+                    (observed_at, total_tokens, session_count, active_count, account_key)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (now, total_tokens, len(visible), active),
+                (now, total_tokens, len(visible), active, self.collector_account_key()),
             )
             db.executemany(
                 """
                 INSERT OR REPLACE INTO session_samples
-                    (observed_at, node_key, session_key, project_key, model, tokens_used, updated_at, archived)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (observed_at, node_key, session_key, project_key, model, tokens_used, updated_at, archived, account_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1024,6 +1089,7 @@ class UsageStore:
                         session["tokens"],
                         session["updated_at"],
                         int(session["archived"]),
+                        self.collector_account_key(),
                     )
                     for session in sessions
                 ],
@@ -1032,7 +1098,14 @@ class UsageStore:
             db.execute("DELETE FROM overview_samples WHERE observed_at < ?", (cutoff,))
             db.execute("DELETE FROM session_samples WHERE observed_at < ?", (cutoff,))
 
-    def dashboard(self, now: int | None = None) -> dict[str, Any]:
+    def dashboard(self, now: int | None = None, account_key: str | None = None) -> dict[str, Any]:
+        selected = account_key or self.collector_account_key()
+        if account_key and not any(row["account_key"] == selected for row in self.accounts()["registered"]):
+            raise ValueError("unknown monitoring account")
+        with self.account_scope(selected):
+            return self._dashboard(now)
+
+    def _dashboard(self, now: int | None = None) -> dict[str, Any]:
         now = int(now or time.time())
         nodes, all_sessions = self.read_current_sessions(now)
         sessions = [session for session in all_sessions if not session["archived"]]
@@ -1042,29 +1115,19 @@ class UsageStore:
                 """
                 SELECT observed_at, total_tokens, session_count, active_count
                 FROM overview_samples
-                WHERE observed_at >= ?
+                WHERE observed_at >= ? AND account_key = ?
                 ORDER BY observed_at
                 """,
-                (history_cutoff,),
+                (history_cutoff, self.collector_account_key()),
             ).fetchall()
-            previous = {
-                (row["node_key"], row["session_key"]): row["tokens_used"]
-                for row in db.execute(
-                    """
-                    SELECT sample.node_key, sample.session_key, sample.tokens_used
-                    FROM session_samples AS sample
-                    JOIN (
-                        SELECT node_key, session_key, MAX(observed_at) AS observed_at
-                        FROM session_samples
-                        WHERE observed_at < ?
-                        GROUP BY node_key, session_key
-                    ) AS prior
-                    ON prior.node_key = sample.node_key AND prior.session_key = sample.session_key
-                    AND prior.observed_at = sample.observed_at
-                    """,
-                    (now - self.config.interval,),
-                )
-            }
+            previous = {}
+            for session in all_sessions:
+                row = db.execute("""SELECT tokens_used FROM session_samples
+                    WHERE account_key=? AND node_key=? AND session_key=? AND observed_at<?
+                    ORDER BY observed_at DESC LIMIT 1""",
+                    (self.collector_account_key(), session["node_key"], session["key"], now - self.config.interval)).fetchone()
+                if row is not None:
+                    previous[(session["node_key"], session["key"])] = row["tokens_used"]
 
         for session in sessions:
             session["active"] = now - session["updated_at"] <= self.config.active_window
@@ -1103,7 +1166,7 @@ class UsageStore:
             weekly_token_breakdown["account_tokens"] if weekly_token_breakdown is not None else None
         )
         with self._lock, self._connect_monitor() as db:
-            analytics = read_analytics(db, account_usage, weekly_usage, all_sessions, nodes, now, weekly_token_breakdown)
+            analytics = read_analytics(db, account_usage, weekly_usage, all_sessions, nodes, now, weekly_token_breakdown, account_key=self.collector_account_key())
         for session in sessions:
             session["created_at"] = utc_iso(session["created_at"])
             session["updated_at"] = utc_iso(session["updated_at"])
@@ -1125,6 +1188,8 @@ class UsageStore:
                     if window and window.get("resets_at") is not None:
                         window["resets_at_iso"] = utc_iso(window["resets_at"])
         return {
+            "accounts": self.accounts(),
+            "selected_account_key": self.collector_account_key(),
             "summary": {
                 "total_tokens": lifetime_tokens if lifetime_tokens is not None else session_total,
                 "lifetime_tokens": lifetime_tokens,
@@ -1181,6 +1246,11 @@ class Collector(threading.Thread):
                 self.last_error = str(error)
             if time.monotonic() >= self.next_account_usage_at:
                 self.next_account_usage_at = time.monotonic() + 30
+                local_key = self.store.read_account(self.store.collector_token)["key"]
+                if not any(row["account_key"] == local_key and row["enabled"] for row in self.store.accounts()["registered"]):
+                    self.account_usage_error = None
+                    self.stopped.wait(self.store.config.interval)
+                    continue
                 try:
                     live = read_app_server_usage(self.store.config.auth_file.parent)
                     local_email = str(self.store.read_account().get("email") or "").casefold()
@@ -1261,16 +1331,46 @@ def build_handler(store: UsageStore, collector: Collector):
                 return
             if path == "/api/dashboard":
                 try:
-                    self.send_json(store.dashboard())
+                    account_key = parse_qs(urlparse(self.path).query).get("account_key", [None])[0]
+                    self.send_json(store.dashboard(account_key=account_key))
+                except ValueError as error:
+                    self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
                 except (OSError, sqlite3.Error) as error:
                     self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            if path == "/api/accounts":
+                self.send_json(store.accounts())
                 return
             if path == "/":
                 self.path = "/index.html"
             super().do_GET()
 
         def do_POST(self) -> None:
-            if urlparse(self.path).path != "/api/ingest":
+            path = urlparse(self.path).path
+            if path == "/api/accounts":
+                if not self.dashboard_authorized():
+                    self.request_dashboard_login()
+                    return
+                origin = self.headers.get("Origin")
+                if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json" or (
+                    origin and urlparse(origin).netloc != self.headers.get("Host")
+                ):
+                    self.send_json({"error": "invalid account request origin or content type"}, HTTPStatus.FORBIDDEN)
+                    return
+                try:
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 4096:
+                        raise ValueError("invalid payload size")
+                    payload = json.loads(self.rfile.read(size))
+                    if not isinstance(payload, dict):
+                        raise ValueError("invalid account payload")
+                    store.save_account(payload.get("account_key"), payload.get("label"),
+                                       payload.get("enabled", True), payload.get("make_default", False))
+                    self.send_json({"ok": True, "accounts": store.accounts()})
+                except (ValueError, TypeError) as error:
+                    self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            if path not in ("/api/ingest", "/api/collector/config"):
                 self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 return
             try:
@@ -1288,10 +1388,19 @@ def build_handler(store: UsageStore, collector: Collector):
                 if not hmac.compare_digest(signature, expected):
                     raise PermissionError("invalid signature")
                 payload = json.loads(body)
+                if path == "/api/collector/config":
+                    response = store.discover_account(payload)
+                    response.update({"ok": True, "server_version": COLLECTOR_VERSION})
+                    update = store._collector_update(payload.get("collector"))
+                    if update:
+                        response["update"] = update
+                    self.send_json(response, response_token=store.collector_token)
+                    return
                 store.ingest(payload)
                 store.collect()
                 node_key = str((payload.get("node") or {}).get("key") or "")
-                response = store.collector_response(node_key, payload.get("collector"))
+                with store.account_scope(payload["account"]["key"]):
+                    response = store.collector_response(node_key, payload.get("collector"))
                 self.send_json(
                     response, HTTPStatus.ACCEPTED, response_token=store.collector_token,
                 )

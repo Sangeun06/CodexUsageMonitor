@@ -10,6 +10,21 @@ param(
 
 $ErrorActionPreference = "Stop"
 $BundleDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$InstallDir = Join-Path $env:LOCALAPPDATA "CodexUsageCollector"
+$ConfigDir = Join-Path $env:APPDATA "CodexUsageCollector"
+$SavedAccountKey = ""
+$ExistingConfig = Join-Path $ConfigDir "collector-config.json"
+if (Test-Path -LiteralPath $ExistingConfig) {
+    $Saved = Get-Content -Raw -LiteralPath $ExistingConfig | ConvertFrom-Json
+    if (-not $PSBoundParameters.ContainsKey("Server")) { $Server = [string]$Saved.server }
+    if (-not $PSBoundParameters.ContainsKey("TokenFile")) { $TokenFile = [string]$Saved.token_file }
+    $SavedAccountKey = [string]$Saved.account_key
+}
+$PreviousTask = Get-ScheduledTask -TaskName "CodexUsageCollector-$($env:USERNAME)" -ErrorAction SilentlyContinue
+if (-not $SavedAccountKey -and $PreviousTask -and [string]$PreviousTask.Actions[0].Arguments -match '"--account-key"\s+"([^"]+)"') {
+    $SavedAccountKey = $Matches[1]
+}
+if ($SavedAccountKey) { $AccountKey = $SavedAccountKey }
 
 if (-not $Server) {
     $ConfigLine = Get-Content (Join-Path $BundleDir "bundle.conf") |
@@ -88,7 +103,14 @@ if ($ExistingTask) {
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $ConfigDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $BundleDir "collector.py") -Destination $InstalledCollector -Force
-Copy-Item -LiteralPath $TokenFile -Destination $InstalledToken -Force
+if ([IO.Path]::GetFullPath($TokenFile) -ne [IO.Path]::GetFullPath($InstalledToken)) {
+    Copy-Item -LiteralPath $TokenFile -Destination $InstalledToken -Force
+}
+Copy-Item -LiteralPath (Join-Path $BundleDir "configure.ps1") -Destination (Join-Path $InstallDir "configure.ps1") -Force
+Copy-Item -LiteralPath (Join-Path $BundleDir "configure.cmd") -Destination (Join-Path $InstallDir "configure.cmd") -Force
+$ConfigFile = Join-Path $ConfigDir "collector-config.json"
+@{ server = $Server; token_file = $InstalledToken; account_key = $AccountKey } |
+    ConvertTo-Json | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
 
 # Limit the token to the current Windows user and SYSTEM.
 & icacls.exe $InstalledToken /inheritance:r /grant:r "$($Identity):(R)" "*S-1-5-18:(F)" | Out-Null
@@ -100,6 +122,7 @@ function Quote-TaskArgument([string]$Value) {
 $CollectorArguments = @($PythonPrefix) + @(
     $InstalledCollector,
     "--server", $Server,
+    "--config-file", $ConfigFile,
     "--token-file", $InstalledToken,
     "--account-key", $AccountKey,
     "--state-file", $StateFile,

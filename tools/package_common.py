@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 
@@ -14,6 +16,13 @@ def resolve_account_key(root: Path, token_file: Path, explicit: str | None = Non
 
 
 def registered_account_key(root: Path, token_file: Path, auth_file: Path | None = None) -> str:
+    database = root / "data" / "monitor.sqlite"
+    if database.is_file() and auth_file is None:
+        with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='monitor_settings'").fetchone():
+                row = db.execute("SELECT value FROM monitor_settings WHERE key='default_account'").fetchone()
+                if row:
+                    return row[0]
     sys.path.insert(0, str(root))
     from collector import read_account
 

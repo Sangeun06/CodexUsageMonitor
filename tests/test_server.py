@@ -43,6 +43,9 @@ class UsageStoreTest(unittest.TestCase):
             interval=10, active_window=60,
         ))
 
+        self.store.read_account = Mock(return_value={"key": "aaaaaaaaaaaa", "name": "Test", "email": None, "plan": None})
+        self.store.save_account("aaaaaaaaaaaa", make_default=True)
+
     def tearDown(self):
         self.temp.cleanup()
 
@@ -78,7 +81,7 @@ class UsageStoreTest(unittest.TestCase):
             usage["observed_at"] = observed_at
         return {
             "node": {"key": node_key, "hostname": "worker", "os_user": node_key},
-            "account": {"key": "shared-acct"},
+            "account": {"key": "aaaaaaaaaaaa"},
             "sessions": [{"key": "shared-session", "project_key": "project",
                           "tokens": tokens, "created_at": 800_000, "updated_at": 1_000_030}],
             "account_usage": usage,
@@ -257,17 +260,43 @@ class UsageStoreTest(unittest.TestCase):
         self.store.dashboard_password = "테스트-비밀번호"
         self.assertTrue(self.handler({}).dashboard_authorized())
 
+    def test_collector_can_discover_an_account_without_registering_it(self):
+        key = "cccccccccccc"
+        handler = self.handler({"account": {"key": key, "email": "candidate@example.com"}}, "/api/collector/config")
+        with patch("server.time.time", return_value=1000000):
+            handler.do_POST()
+        response = handler.send_json.call_args.args[0]
+        self.assertNotIn(key, response["monitored_accounts"])
+        self.assertEqual(handler.send_json.call_args.kwargs["response_token"], self.store.collector_token)
+        self.assertTrue(any(row["account_key"] == key for row in self.store.accounts()["discovered"]))
+
+    def test_account_registration_requires_dashboard_login_and_same_origin_json(self):
+        handler = self.handler({"account_key": "cccccccccccc"}, "/api/accounts")
+        handler.request_dashboard_login = Mock()
+        handler.headers["Authorization"] = "invalid"
+        handler.do_POST()
+        handler.request_dashboard_login.assert_called_once()
+        handler = self.handler({"account_key": "cccccccccccc"}, "/api/accounts")
+        handler.headers.update({"Content-Type": "text/plain", "Origin": "https://foreign.example", "Host": "monitor.example"})
+        handler.do_POST()
+        self.assertEqual(handler.send_json.call_args.args[1], 403)
+        handler.headers.update({"Content-Type": "application/json", "Origin": "https://monitor.example"})
+        handler.rfile.seek(0)
+        handler.do_POST()
+        self.assertTrue(handler.send_json.call_args.args[0]["ok"])
+
     def test_ingest_adds_remote_node_without_raw_content(self):
+        self.store.save_account("bbbbbbbbbbbb")
         payload = {
             "node": {"key": "remote-node", "hostname": "worker-1", "os_user": "alice"},
-            "account": {"key": "acct", "name": "Alice", "email": "alice@example.com", "plan": "plus"},
+            "account": {"key": "bbbbbbbbbbbb", "name": "Alice", "email": "alice@example.com", "plan": "plus"},
             "sessions": [{
                 "key": "hashed-session", "project_key": "hashed-project", "project_name": "frontend",
                 "model": "gpt-test", "tokens": 900, "created_at": 900, "updated_at": 995, "archived": False,
             }],
         }
         self.store.ingest(payload, now=1000)
-        dashboard = self.store.dashboard(now=1000)
+        dashboard = self.store.dashboard(now=1000, account_key="bbbbbbbbbbbb")
         remote = next(session for session in dashboard["sessions"] if session["source"] == "collector")
         self.assertEqual(remote["project_name"], "frontend")
         self.assertEqual(remote["hostname"], "worker-1")
@@ -281,7 +310,7 @@ class UsageStoreTest(unittest.TestCase):
         def report(node_key, os_user, buckets):
             return {
                 "node": {"key": node_key, "hostname": "worker", "os_user": os_user},
-                "account": {"key": "shared-acct"},
+                "account": {"key": "aaaaaaaaaaaa"},
                 "sessions": [{
                     "key": f"session-{node_key}", "project_key": "project", "model": "gpt-test",
                     "tokens": 1000, "created_at": at(12), "updated_at": now,
@@ -315,7 +344,7 @@ class UsageStoreTest(unittest.TestCase):
         def report(node_key, hostname, lifetime, used_percent):
             return {
                 "node": {"key": node_key, "hostname": hostname, "os_user": "alice"},
-                "account": {"key": "shared-acct", "email": "shared@example.com"},
+                "account": {"key": "aaaaaaaaaaaa", "email": "shared@example.com"},
                 "sessions": [],
                 "account_usage": {
                     "source": "codex-app-server", "observed_at": 1000,
@@ -353,7 +382,7 @@ class UsageStoreTest(unittest.TestCase):
         def report(tokens, lifetime):
             return {
                 "node": {"key": "node-a", "hostname": "worker-a", "os_user": "alice"},
-                "account": {"key": "shared-acct"},
+                "account": {"key": "aaaaaaaaaaaa"},
                 "sessions": [{
                     "key": "session-a", "project_key": "project-a", "project_name": "frontend",
                     "model": "gpt-test", "tokens": tokens, "created_at": 900_000,
@@ -392,7 +421,7 @@ class UsageStoreTest(unittest.TestCase):
         def report(node_key, tokens, lifetime):
             return {
                 "node": {"key": node_key, "hostname": node_key, "os_user": node_key},
-                "account": {"key": "shared-acct"},
+                "account": {"key": "aaaaaaaaaaaa"},
                 "sessions": [{
                     "key": f"session-{node_key}", "project_key": "project", "model": "gpt-test",
                     "tokens": tokens, "created_at": 900_000, "updated_at": 1_000_030,
@@ -440,7 +469,7 @@ class UsageStoreTest(unittest.TestCase):
         def report(tokens, lifetime, buckets):
             return {
                 "node": {"key": "node-a", "hostname": "worker", "os_user": "alice"},
-                "account": {"key": "shared-acct"},
+                "account": {"key": "aaaaaaaaaaaa"},
                 "sessions": [{
                     "key": "session-a", "project_key": "project", "model": "gpt-test",
                     "tokens": tokens, "created_at": 900_000, "updated_at": 1_000_030,
@@ -487,7 +516,7 @@ class UsageStoreTest(unittest.TestCase):
         def report(key, buckets):
             return {
                 "node": {"key": key, "hostname": key, "os_user": key},
-                "account": {"key": "shared-acct"}, "account_usage": usage,
+                "account": {"key": "aaaaaaaaaaaa"}, "account_usage": usage,
                 "sessions": [{"key": key, "tokens": 1_000_000, "created_at": start - 86400,
                               "updated_at": now, "usage_buckets": buckets}],
             }
@@ -614,7 +643,7 @@ class UsageStoreTest(unittest.TestCase):
         def report(tokens, lifetime):
             return {
                 "node": {"key": "node-a", "hostname": "worker-a", "os_user": "alice"},
-                "account": {"key": "shared-acct"},
+                "account": {"key": "aaaaaaaaaaaa"},
                 "sessions": [{
                     "key": "old-session", "project_key": "project-a", "project_name": "frontend",
                     "model": "gpt-test", "tokens": tokens, "created_at": 800_000,
@@ -651,7 +680,7 @@ class UsageStoreTest(unittest.TestCase):
         report = {
             "collector": {"version": "0.6.0", "kind": "user"},
             "node": {"key": "node-a", "hostname": "worker-a", "os_user": "alice"},
-            "account": {"key": "shared-acct"},
+            "account": {"key": "aaaaaaaaaaaa"},
             "sessions": [{
                 "key": "session-a", "project_key": "project-a", "project_name": "frontend",
                 "model": "gpt-test", "tokens": 500, "created_at": 900_000,
@@ -690,7 +719,7 @@ class UsageStoreTest(unittest.TestCase):
         def report(used_percent, resets_at, lifetime=5000):
             return {
                 "node": {"key": "node-a", "hostname": "worker-a", "os_user": "alice"},
-                "account": {"key": "shared-acct"}, "sessions": [],
+                "account": {"key": "aaaaaaaaaaaa"}, "sessions": [],
                 "account_usage": {
                     "source": "codex-app-server",
                     "summary": {"lifetime_tokens": lifetime}, "daily_usage": [],
@@ -733,15 +762,16 @@ class UsageStoreTest(unittest.TestCase):
     def test_dashboard_hides_previously_stored_unregistered_accounts(self):
         payload = {
             "node": {"key": "old-node", "hostname": "worker-1", "os_user": "bob"},
-            "account": {"key": "old-account"},
+            "account": {"key": "cccccccccccc"},
             "sessions": [{
                 "key": "old-session", "project_key": "old-project", "project_name": "private",
                 "model": "gpt-test", "tokens": 500, "created_at": 900, "updated_at": 995,
                 "archived": False,
             }],
         }
+        self.store.save_account("cccccccccccc")
         self.store.ingest(payload, now=1000)
-        with patch.object(self.store, "collector_account_key", return_value="registered-account"):
+        with patch.object(self.store, "collector_account_key", return_value="aaaaaaaaaaaa"):
             dashboard = self.store.dashboard(now=1000)
         self.assertFalse(any(node["key"] == "old-node" for node in dashboard["nodes"]))
         self.assertFalse(any(session["key"] == "old-session" for session in dashboard["sessions"]))

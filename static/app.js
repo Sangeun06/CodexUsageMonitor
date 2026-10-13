@@ -1,4 +1,4 @@
-const state = { data: null, query: "", expanded: new Set(), month: null, view: "weekly", explorers: null };
+const state = { data: null, query: "", expanded: new Set(), month: null, view: "weekly", explorers: null, accountKey: null, refreshSequence: 0 };
 const $ = (id) => document.getElementById(id);
 const number = new Intl.NumberFormat("ko-KR");
 const compactNumber = new Intl.NumberFormat("ko-KR", { notation: "compact", maximumFractionDigits: 1 });
@@ -463,6 +463,8 @@ function renderSessions(sessions) {
 
 function render(data) {
   state.data = data;
+  state.accountKey = data.selected_account_key;
+  if (typeof AccountsView !== "undefined") AccountsView.render(data);
   renderSummary(data);
   renderUsage(data);
   renderReconciliation(data);
@@ -484,22 +486,27 @@ function render(data) {
   renderSessions(data.sessions);
 }
 
-async function refresh() {
-  if (state.refreshing) return;
+async function refresh(force = false) {
+  if (state.refreshing && force !== true) return;
+  const sequence = ++state.refreshSequence;
   state.refreshing = true;
   $("manualRefresh").disabled = true;
   $("manualRefresh").textContent = "갱신 중…";
   try {
-    const response = await fetch("/api/dashboard", { cache: "no-store" });
+    const response = await fetch("/api/dashboard" + (state.accountKey ? "?account_key=" + encodeURIComponent(state.accountKey) : ""), { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    render(await response.json());
+    const data = await response.json();
+    if (sequence !== state.refreshSequence) return;
+    render(data);
     document.querySelector(".connection").classList.remove("error");
     $("connectionText").textContent = "모니터 서버 연결됨";
   } catch (error) {
+    if (sequence !== state.refreshSequence) return;
     document.querySelector(".connection").classList.add("error");
     $("connectionText").textContent = "연결 오류";
     console.error(error);
   } finally {
+    if (sequence !== state.refreshSequence) return;
     state.refreshing = false;
     $("manualRefresh").disabled = false;
     $("manualRefresh").textContent = "새로고침 ↻";
@@ -539,5 +546,14 @@ $("usageChart").addEventListener("pointerleave", () => {
   $("limitTooltip").hidden = true;
   if (state.explorers) { state.explorers.weekly.hovered = null; state.explorers.weekly.inspect(state.explorers.weekly.selected); }
 });
+if (typeof AccountsView !== "undefined") AccountsView.init(key => {
+  state.accountKey = key;
+  state.month = null;
+  state.expanded.clear();
+  if (state.explorers) {
+    for (const explorer of Object.values(state.explorers)) { explorer.selected = null; explorer.hovered = null; }
+  }
+  refresh(true);
+}, () => refresh(true));
 refresh();
 setInterval(refresh, 10_000);

@@ -31,41 +31,58 @@ class UsageWindow:
 class UsageRepository:
     """Read-only queries; the caller owns the connection and its lock."""
 
-    def __init__(self, db: sqlite3.Connection):
+    def __init__(self, db: sqlite3.Connection, account_key: str | None = None):
         self.db = db
+        self.account_key = account_key
+
+    def scope(self):
+        return ("", ()) if self.account_key is None else (" AND account_key = ?", (self.account_key,))
 
     def verified_sessions(self, window: UsageWindow) -> dict[tuple[str, str], int]:
+        clause, args = self.scope()
         return {
             (row["node_key"], row["session_key"]): int(row["tokens"] or 0)
             for row in self.db.execute(
-                """SELECT node_key, session_key, SUM(tokens_used) AS tokens
+                f"""SELECT node_key, session_key, SUM(tokens_used) AS tokens
                    FROM collector_session_usage
-                   WHERE bucket_at >= ? AND bucket_at + 60 <= ?
-                   GROUP BY node_key, session_key""", (window.start, window.end),
+                   WHERE bucket_at >= ? AND bucket_at + 60 <= ? {clause}
+                   GROUP BY node_key, session_key""", (window.start, window.end, *args),
             )
         }
 
-    def first_snapshots(self, window: UsageWindow) -> dict[tuple[str, str], tuple[int, int]]:
+    def first_snapshots(self, window: UsageWindow, session_keys=None) -> dict[tuple[str, str], tuple[int, int]]:
+        if session_keys is not None and self.account_key is not None:
+            result = {}
+            for node_key, session_key in session_keys:
+                row = self.db.execute("""SELECT tokens_used, observed_at FROM session_samples
+                    WHERE account_key=? AND node_key=? AND session_key=? AND observed_at>=? AND observed_at<=?
+                    ORDER BY observed_at LIMIT 1""", (self.account_key, node_key, session_key, window.start, window.end)).fetchone()
+                if row is not None:
+                    result[(node_key, session_key)] = (int(row["tokens_used"]), int(row["observed_at"]))
+            return result
+        clause, args = self.scope()
+        identity = "account_key, " if self.account_key is not None else ""
         # A sample BEFORE the reset could include pre-reset growth. Only a
         # sample at/after the boundary can safely baseline an old session.
         return {
             (row["node_key"], row["session_key"]): (int(row["tokens_used"]), int(row["observed_at"]))
             for row in self.db.execute(
-                """SELECT s.node_key, s.session_key, s.tokens_used, s.observed_at
+                f"""SELECT s.node_key, s.session_key, s.tokens_used, s.observed_at
                    FROM session_samples s JOIN (
-                       SELECT node_key, session_key, MIN(observed_at) AS observed_at
-                       FROM session_samples WHERE observed_at >= ? AND observed_at <= ?
-                       GROUP BY node_key, session_key
-                   ) b USING (node_key, session_key, observed_at)""", (window.start, window.end),
+                       SELECT {identity}node_key, session_key, MIN(observed_at) AS observed_at
+                       FROM session_samples WHERE observed_at >= ? AND observed_at <= ? {clause}
+                       GROUP BY {identity}node_key, session_key
+                   ) b USING ({identity}node_key, session_key, observed_at)""", (window.start, window.end, *args),
             )
         }
 
     def daily_events(self, window: UsageWindow) -> list[sqlite3.Row]:
+        clause, args = self.scope()
         return self.db.execute(
-            """SELECT node_key, date(bucket_at, 'unixepoch', 'localtime') AS usage_date,
+            f"""SELECT node_key, date(bucket_at, 'unixepoch', 'localtime') AS usage_date,
                       SUM(tokens_used) AS tokens
-               FROM collector_session_usage WHERE bucket_at >= ? AND bucket_at + 60 <= ?
-               GROUP BY node_key, usage_date""", (window.start, window.end),
+               FROM collector_session_usage WHERE bucket_at >= ? AND bucket_at + 60 <= ? {clause}
+               GROUP BY node_key, usage_date""", (window.start, window.end, *args),
         ).fetchall()
 
 

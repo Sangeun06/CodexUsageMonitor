@@ -58,7 +58,7 @@ class PackagingTest(unittest.TestCase):
         self.assertIn("collector_windows_machine.py", script)
         self.assertIn("register_machine_task.ps1", script)
         self.assertIn("Sysnative\\WindowsPowerShell", script)
-        self.assertIn("advfirewall firewall add rule", script)
+        self.assertIn("advfirewall firewall add rule", task_script)
         self.assertIn("SetRegView 64", script)
         self.assertLess(script.index('schtasks.exe /End /TN "CodexUsageCollectorMachine"'), script.index('File /r "${RUNTIME_DIR}\\*.*"'))
 

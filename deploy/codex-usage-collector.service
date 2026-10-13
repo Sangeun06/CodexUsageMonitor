@@ -13,6 +13,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=%h/.config %h/.local/share/codex-usage-collector
 
 [Install]
 WantedBy=default.target

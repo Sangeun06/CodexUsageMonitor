@@ -1,8 +1,15 @@
 <!doctype html>
-<html lang="ko"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark" /><title>Codex Usage · 사용량 분석</title><link rel="stylesheet" href="/styles.css?v=20261008-1" /></head>
+<html lang="ko"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark" /><title>Codex Usage · 사용량 분석</title><link rel="stylesheet" href="/styles.css?v=20261013-1" /></head>
 <body><main class="shell">
 <header class="topbar"><div class="brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><p class="eyebrow">USAGE ANALYTICS</p><h1>Codex Usage</h1></div></div><div class="header-status"><div class="connection"><i></i><span id="connectionText">연결 중</span></div><span>업데이트 <strong id="lastUpdated">—</strong></span></div></header>
 <div class="dashboard-intro"><div><h2>누가, 언제, 얼마나 사용했나요?</h2><p>사용 기간과 집계 기준을 분리해 확인하세요. 모든 날짜별 분석은 UTC 기준입니다.</p></div><button id="manualRefresh" class="quiet-button">새로고침 ↻</button></div>
+<section class="account-selector" aria-label="모니터링 계정 선택"><label>조회 계정 <select id="monitorAccountSelect"></select></label><span id="monitorAccountStatus"></span><button id="manageAccounts" class="quiet-button">계정 관리</button></section>
+<details id="accountManagement" class="panel account-management"><summary>모니터링할 계정 관리</summary>
+<p class="data-note">등록된 계정을 각각 집계합니다. 수집을 정지해도 기존 기록은 유지됩니다. 계정 한도는 해당 계정으로 로그인한 수집기가 보내는 최신 보고값으로 갱신됩니다.</p>
+<div id="registeredAccounts" class="registered-accounts"></div>
+<form id="registerAccountForm" class="register-account-form"><label>발견된 계정 <select id="discoveredAccountSelect"><option value="">계정 선택</option></select></label><label>계정 키 <input id="registerAccountKey" required pattern="[a-fA-F0-9]{12}" maxlength="12" placeholder="12자리 계정 키" /></label><label>표시 이름 <input id="registerAccountLabel" maxlength="120" placeholder="예: 팀 계정" /></label><button type="submit" class="quiet-button">계정 등록</button></form>
+<p class="data-note">새 계정의 수집기를 연결하면 발견 목록에 나타납니다. 서버의 현재 로그인 계정도 목록에서 등록할 수 있습니다.</p><p id="accountManagementMessage" class="data-note" role="status"></p>
+</details>
 <nav class="view-tabs" role="tablist" aria-label="사용량 분석 범위"><button id="tab-weekly" role="tab" aria-selected="true" aria-controls="view-weekly" data-view="weekly">주간 사용량</button><button id="tab-monthly" role="tab" aria-selected="false" tabindex="-1" aria-controls="view-monthly" data-view="monthly">월별 사용량</button><button id="tab-lifetime" role="tab" aria-selected="false" tabindex="-1" aria-controls="view-lifetime" data-view="lifetime">전체 누적</button><button id="tab-operations" role="tab" aria-selected="false" tabindex="-1" aria-controls="view-operations" data-view="operations">수집 상태 · 세션</button></nav>
 <section id="view-weekly" role="tabpanel" aria-labelledby="tab-weekly">
 <div class="scope-heading"><div><h2>현재 주간 주기</h2><p id="weeklyScope">계정 초기화 시각 기준 · 달력의 월–일과 다를 수 있습니다.</p></div><span class="scope-badge">주간 · WEEK</span></div>
@@ -155,4 +162,4 @@
         <div class="usage-empty" id="trendEmpty">확인된 세션 사용량이 아직 없습니다. 수집 시작 전 기록이나 미수집 구간은 표시되지 않습니다.</div>
       </section></details></section>
 <footer><span>본문·제목·경로·원본 ID는 수집하지 않습니다.</span><span id="refreshLabel">자동 새로고침</span></footer>
-</main><script src="/usage-view.js?v=20261008-1"></script><script src="/analytics-view.js?v=20261008-1"></script><script src="/app.js?v=20261008-1"></script></body></html>
+</main><script src="/usage-view.js?v=20261013-1"></script><script src="/analytics-view.js?v=20261013-1"></script><script src="/accounts-view.js?v=20261013-1"></script><script src="/app.js?v=20261013-1"></script></body></html>

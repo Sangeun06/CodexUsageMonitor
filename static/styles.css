@@ -283,3 +283,16 @@ footer { color: var(--muted); font-size: 11px; }
   .token-total::after { font-size: 12px; }.hero { padding: 24px 16px; }.interactive-chart > svg { min-height: 190px; }.panel-note { padding: 13px 16px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+/* Monitoring targets remain available while switching analysis tabs. */
+.account-selector { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 16px 0; }
+.account-selector label { display: flex; gap: 12px; align-items: center; min-width: 0; }
+.account-selector select { max-width: min(440px, 65vw); }
+.account-selector > span { color: var(--muted); font-size: 13px; }
+.account-management { margin-bottom: 20px; }
+.account-management summary { cursor: pointer; font-weight: 600; }
+.registered-accounts { display: grid; gap: 12px; margin: 18px 0; }
+.registered-account, .register-account-form { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+.registered-account label, .register-account-form label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); max-width: 100%; }
+.registered-account input, .register-account-form input { color: var(--text); background: #101921; border: 1px solid #30404f; border-radius: 8px; padding: 9px 11px; max-width: 100%; }
+.account-key { font-family: monospace; font-size: 12px; padding: 10px 0; }
+@media (max-width: 600px) { .account-selector > span { flex-basis: 100%; } .registered-account { padding-bottom: 15px; border-bottom: 1px solid #30404f; } }

@@ -6,10 +6,11 @@ NSIS_DIR ?= /tmp/codex-installer-deps/nsis-root/usr/share/nsis
 
 test:
 	python3 -m unittest discover -s tests -v
-	python3 -m py_compile server.py usage_aggregation.py usage_analytics.py collector.py collector_windows_machine.py tools/build_collector_bundle.py tools/build_windows_bundle.py tools/build_windows_exe.py
+	python3 -m py_compile server.py account_registry.py usage_aggregation.py usage_analytics.py collector.py collector_windows_machine.py tools/build_collector_bundle.py tools/build_windows_bundle.py tools/build_windows_exe.py
 	node --check static/usage-view.js
 	node --check static/analytics-view.js
 	node --check static/app.js
+	node --check static/accounts-view.js
 	node --test tests/test_charts.js tests/test_analytics_view.js
 
 bundle:

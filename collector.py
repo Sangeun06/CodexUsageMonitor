@@ -24,12 +24,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+from urllib.parse import urlparse
 
 
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_LOG_BACKUPS = 3
 APP_SERVER_TIMEOUT_SECONDS = 15
-COLLECTOR_VERSION = "0.6.1"
+COLLECTOR_VERSION = "0.7.0"
 UPDATE_FILE_NAMES = {"collector.py", "collector_windows_machine.py"}
 
 
@@ -440,6 +441,8 @@ def track_target_usage(
     auth_file: Path,
     state_file: Path,
     scope_key: str,
+    allow_initial: bool = True,
+    accumulate: bool = True,
 ) -> list[dict[str, Any]]:
     """Accumulate token growth observed while the target account is logged in."""
     try:
@@ -509,15 +512,15 @@ def track_target_usage(
             delta_account_key = current_account_key
             if account_changed and int(session.get("updated_at") or 0) <= login_transition_at + 5:
                 delta_account_key = str(previous_account_key)
-            if continuous and current_tokens >= previous_tokens and delta_account_key == target_account_key:
+            if accumulate and continuous and current_tokens >= previous_tokens and delta_account_key == target_account_key:
                 target_tokens += current_tokens - previous_tokens
             record["last_tokens"] = current_tokens
             record["target_tokens"] = target_tokens
         else:
             can_claim_initial = (
-                current_account_key == target_account_key
+                accumulate and current_account_key == target_account_key
                 and (
-                    (first_scan and int(session["created_at"]) >= login_transition_at - 5)
+                    (allow_initial and first_scan and int(session["created_at"]) >= login_transition_at - 5)
                     or (continuous and int(session["created_at"]) >= max(
                         previous_scan_at, login_transition_at if account_changed else previous_scan_at,
                     ))
@@ -572,7 +575,7 @@ def track_target_usage(
                 None,
             )
             if interval is not None:
-                if interval.get("account_key") == target_account_key:
+                if accumulate and interval.get("account_key") == target_account_key:
                     pending[key] = pending.get(key, 0) + tokens
             elif occurred_at + 60 > scan_at:
                 # The current minute cannot be attributed until a later scan
@@ -586,6 +589,7 @@ def track_target_usage(
     profile_state["last_account_key"] = current_account_key
     profile_state["last_scan_at"] = scan_at
     profile_state["account_intervals"] = intervals[-1000:]
+    profile_state["target_account_key"] = target_account_key
 
     state_file.parent.mkdir(parents=True, exist_ok=True)
     temporary = state_file.with_name(state_file.name + ".tmp")
@@ -661,11 +665,11 @@ def snapshot(
     }
 
 
-def send(server: str, payload: dict[str, Any], token: str) -> dict[str, Any]:
+def send(server: str, payload: dict[str, Any], token: str, path: str = "/api/ingest") -> dict[str, Any]:
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
     timestamp = str(int(time.time()))
     signature = hmac.new(token.encode(), timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
-    endpoint = server.rstrip("/") + "/api/ingest"
+    endpoint = server.rstrip("/") + path
     req = request.Request(
         endpoint,
         data=body,
@@ -677,7 +681,7 @@ def send(server: str, payload: dict[str, Any], token: str) -> dict[str, Any]:
         },
     )
     with request.urlopen(req, timeout=15) as response:
-        if response.status != 202:
+        if response.status not in (200, 202):
             raise RuntimeError(f"collector rejected: HTTP {response.status}")
         response_body = response.read()
         response_signature = response.headers.get("X-Codex-Response-Signature", "")
@@ -691,6 +695,116 @@ def send(server: str, payload: dict[str, Any], token: str) -> dict[str, Any]:
     if not isinstance(decoded, dict):
         raise RuntimeError("collector response is invalid")
     return decoded
+
+
+def collector_configuration(args):
+    """Reload persisted settings, including for old tasks with fixed arguments."""
+    path = args.config_file or args.token_file.with_name("collector-config.json")
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(settings, dict):
+            raise ValueError("configuration must be an object")
+    except FileNotFoundError:
+        settings = {}
+    server = settings.get("server", args.server)
+    if not isinstance(server, str) or any(ord(char) < 32 or ord(char) == 127 for char in server):
+        raise ValueError("invalid server URL")
+    parsed = urlparse(server or "")
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("server must be an HTTP(S) URL without credentials, query, or fragment")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid server port") from exc
+    account_key = settings.get("account_key") or args.account_key
+    if isinstance(account_key, str):
+        account_key = account_key.lower()
+    if account_key is not None and (not isinstance(account_key, str) or not re.fullmatch(r"[a-f0-9]{12}", account_key)):
+        raise ValueError("invalid legacy account key")
+    return path, {"server": server.rstrip("/"), "token_file": str(Path(settings.get("token_file", args.token_file)).expanduser()),
+                  "account_key": account_key}
+
+
+def configure_collector(args):
+    path = args.config_file or args.token_file.with_name("collector-config.json")
+    if args.configure:
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            previous = {}
+        if not isinstance(previous, dict):
+            raise ValueError("configuration must be an object")
+        # Only explicitly supplied options replace existing settings. Merely
+        # changing the URL must not replace the installed token or account.
+        for flag, field, value in (("--server", "server", args.server), ("--token-file", "token_file", str(args.token_file)),
+                                   ("--account-key", "account_key", args.account_key)):
+            if flag in sys.argv or any(argument.startswith(flag + "=") for argument in sys.argv):
+                previous[field] = value
+        if not previous.get("server") and args.server:
+            previous["server"] = args.server
+        # Validate before replacing the configuration.
+        original = path
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "settings.json"
+            candidate.write_text(json.dumps(previous))
+            args.config_file = candidate
+            _, settings = collector_configuration(args)
+        args.config_file = original
+        token_path = Path(settings["token_file"])
+        if not token_path.is_file() or not token_path.read_text().strip():
+            raise ValueError("collector token file is missing or empty")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+        print(f"Saved {path}; the running collector reloads it on its next scan.")
+    if args.show_config:
+        _, settings = collector_configuration(args)
+        print(json.dumps(settings, indent=2))
+    return args.configure or args.show_config
+
+
+def registered_snapshots(payload, configuration, auth_file, state_file, token, legacy_target=None):
+    """Observe all registered targets, retaining a separate ledger for each."""
+    base = attribution_scope(payload["node"]["key"], token)
+    try:
+        state = json.loads(state_file.read_text())
+    except FileNotFoundError:
+        state = {}
+    profile = state.get("profiles", {}).get(base, {})
+    original_target = profile.get("target_account_key") or legacy_target or payload["account"].get("key")
+    targets = set(configuration["tracked_accounts"])
+    if profile and original_target and original_target != "unknown":
+        targets.add(original_target)
+    enabled = set(configuration["monitored_accounts"])
+    result = []
+    for key in sorted(targets):
+        scope = base if key == original_target else f"{base}:{key}"
+        sessions = track_target_usage(payload["sessions"], payload["account"].get("key") or "unknown", key,
+                                      auth_file, state_file, scope, allow_initial=key == original_target,
+                                      accumulate=key in enabled)
+        if key in enabled:
+            account = payload["account"] if key == payload["account"].get("key") else {"key": key}
+            result.append(dict(payload, account=account, sessions=sessions))
+    return result
+
+
+def monitoring_configuration(server, payload, token, legacy_target):
+    discovery = {"account": payload["account"], "node": payload["node"], "collector": payload.get("collector")}
+    try:
+        result = send(server, discovery, token, path="/api/collector/config")
+    except error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+        target = legacy_target or payload["account"].get("key")
+        result = {"tracked_accounts": [target], "monitored_accounts": [target]}
+    for field in ("tracked_accounts", "monitored_accounts"):
+        if not isinstance(result.get(field), list) or any(not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{12}", key) for key in result[field]):
+            raise RuntimeError("invalid server account configuration")
+    if not set(result["monitored_accounts"]).issubset(result["tracked_accounts"]):
+        raise RuntimeError("invalid enabled account configuration")
+    return result
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -835,25 +949,31 @@ def process_server_response(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--server", default=os.getenv("CODEX_MONITOR_SERVER"), required=not os.getenv("CODEX_MONITOR_SERVER"))
+    parser.add_argument("--server", default=os.getenv("CODEX_MONITOR_SERVER"))
     parser.add_argument("--token-file", type=Path, default=Path(os.getenv("CODEX_COLLECTOR_TOKEN_FILE", "~/.config/codex-usage-collector.token")).expanduser())
     parser.add_argument("--state-db", type=Path, default=Path("~/.codex/state_5.sqlite").expanduser())
     parser.add_argument("--auth-file", type=Path, default=Path("~/.codex/auth.json").expanduser())
-    parser.add_argument("--account-key", default=os.getenv("CODEX_TARGET_ACCOUNT_KEY"), help="Only send this anonymized Codex account")
+    parser.add_argument("--account-key", default=os.getenv("CODEX_TARGET_ACCOUNT_KEY"), help="Legacy account binding for attribution migration; monitored targets are managed by the server")
     parser.add_argument("--state-file", type=Path, default=Path(os.getenv("CODEX_COLLECTOR_STATE_FILE", "~/.config/codex-usage-collector-state.json")).expanduser())
     parser.add_argument("--interval", type=int, default=int(os.getenv("CODEX_COLLECTOR_INTERVAL", "30")))
     parser.add_argument("--log-file", type=Path, help="Optional log file (useful for Windows scheduled tasks)")
     parser.add_argument("--log-max-bytes", type=int, default=int(os.getenv("CODEX_COLLECTOR_LOG_MAX_BYTES", str(DEFAULT_LOG_MAX_BYTES))))
     parser.add_argument("--log-backups", type=int, default=int(os.getenv("CODEX_COLLECTOR_LOG_BACKUPS", str(DEFAULT_LOG_BACKUPS))))
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--config-file", type=Path, default=Path(os.environ["CODEX_COLLECTOR_CONFIG_FILE"]).expanduser() if os.getenv("CODEX_COLLECTOR_CONFIG_FILE") else None)
+    parser.add_argument("--configure", action="store_true", help="Save connection settings and exit")
+    parser.add_argument("--show-config", action="store_true", help="Show resolved settings without token contents")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    token = args.token_file.read_text().strip()
-    if not token:
-        raise SystemExit("collector token is empty")
+    try:
+        if configure_collector(args):
+            return
+        collector_configuration(args)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
 
     def log(message: str) -> None:
         line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}"
@@ -864,28 +984,31 @@ def main() -> None:
 
     while True:
         try:
+            _, settings = collector_configuration(args)
+            token = Path(settings["token_file"]).read_text().strip()
+            if not token:
+                raise RuntimeError("collector token is empty")
             payload = snapshot(args.state_db, args.auth_file, token, include_rollout_path=True)
             payload["alert_receipts"] = read_alert_receipts(args.state_file)
-            payload["sessions"] = track_target_usage(
-                payload["sessions"], payload["account"].get("key") or "unknown",
-                args.account_key or payload["account"].get("key") or "unknown",
-                args.auth_file, args.state_file, attribution_scope(payload["node"]["key"], token),
-            )
-            if args.account_key and payload["account"].get("key") != args.account_key:
-                log(f"skipped unregistered account on {payload['node']['hostname']}:{payload['node']['os_user']}")
-            else:
+            configuration = monitoring_configuration(settings["server"], payload, token, settings["account_key"])
+            process_server_response(configuration, args.state_file, log)
+            reports = registered_snapshots(payload, configuration, args.auth_file, args.state_file, token, settings["account_key"])
+            for report in reports:
                 usage_source = "local-fallback"
-                try:
-                    attach_account_usage(payload, args.auth_file.parent)
-                    usage_source = "codex-app-server"
-                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-                    log(f"account usage fallback: {exc}")
-                response = send(args.server, payload, token)
-                log(f"sent {len(payload['sessions'])} sessions source={usage_source} from {payload['node']['hostname']}:{payload['node']['os_user']}")
+                if report["account"]["key"] == payload["account"].get("key"):
+                    try:
+                        attach_account_usage(report, args.auth_file.parent)
+                        usage_source = "codex-app-server"
+                    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                        log(f"account usage fallback: {exc}")
+                response = send(settings["server"], report, token)
+                log(f"sent account={report['account']['key']} sessions={len(report['sessions'])} source={usage_source} from {payload['node']['hostname']}:{payload['node']['os_user']}")
                 process_server_response(response, args.state_file, log)
+            if not reports:
+                log("account discovered; waiting for the server administrator to enable monitoring")
         except CollectorRestart:
             os.execv(sys.executable, [sys.executable, *sys.argv])
-        except (OSError, sqlite3.Error, error.URLError, RuntimeError) as exc:
+        except (OSError, ValueError, sqlite3.Error, error.URLError, RuntimeError) as exc:
             log(f"collector error: {exc}")
             if args.once:
                 raise SystemExit(1) from exc

@@ -173,11 +173,52 @@ python3 collector.py \
 
 Codex가 설치된 환경에서는 수집기가 `codex app-server`의 `account/read`, `account/usage/read`, `account/rateLimits/read`를 30초 간격으로 조회합니다. 실행 파일이나 계정 사용량 조회가 일시적으로 실패해도 기존 로컬 세션 집계는 중단되지 않으며, 서버에는 마지막으로 성공한 계정 전체 스냅샷이 유지됩니다. 공유 계정에서 로그아웃된 동안에는 전체값이 갱신되지 않고 마지막 동기화 시각으로 상태를 확인할 수 있습니다.
 
-배포 패키지에는 중앙 서버에서 현재 로그인한 공유 Codex 계정의 익명 계정 키가 포함됩니다. 각 수집기는 이 키와 일치하는 계정만 전송하며, 중앙 서버도 다른 계정의 수집 요청을 다시 거부합니다. 따라서 같은 PC에 다른 Codex 계정이 있어도 이 대시보드에는 등록되지 않습니다.
+0.7.0부터 모니터링 대상은 서버 DB의 등록 목록으로 관리합니다. 서버의 Codex 로그인 계정을 바꿔도 등록 목록과 기본 조회 계정은 바뀌지 않습니다. 기존 DB 전환 시 마지막으로 집계하던 계정과 세션·분 이벤트·관측 이력을 보존합니다. 처음 사용하는 서버는 현재 로그인 계정을 최초 대상에 등록합니다. 로그인 정보가 없으면 대시보드에서 계정을 등록하세요.
+
+대시보드 상단 **계정 관리**에서 발견된 계정을 선택하고 이름을 붙여 등록합니다. 다른 계정으로 로그인한 새 수집기가 연결되면 계정 키·이메일 등 식별 정보만 발견 목록에 나타나고, 관리자가 등록하기 전에는 세션 사용량을 보내지 않습니다. 12자리 익명 계정 키를 직접 등록할 수도 있습니다. 여러 계정을 동시에 활성화하고 **조회 계정**으로 각 계정의 주간·월별·누적량과 수집 상태를 각각 볼 수 있습니다. **기본 계정으로 지정**은 최초 화면의 조회 기준을 저장합니다. **수집 정지**는 신규 보고를 차단하고 기존 기록은 그대로 남깁니다.
+
+수집기는 서명된 `/api/collector/config` 응답으로 대상 목록을 매번 확인합니다. 같은 장비·세션이라도 계정별 누적값, 분 이벤트와 기준값을 분리하며, 로그인 계정이 바뀐 뒤에도 이전 계정의 확인된 세션 기록을 유지합니다. 계정 한도·전체 누적량은 해당 계정으로 로그인한 수집기가 보낼 때 갱신됩니다. 계정을 등록하는 것만으로 로그아웃된 계정이나 Work·클라우드 사용의 상세 기록을 새로 가져오지는 않습니다.
+
+패키지에 포함되는 계정 키는 서버의 **기본 조회 계정**을 사용하며, 기존 단일 계정 수집 상태를 보존하기 위한 값입니다. 새 서버는 `--account-key KEY`로 빌드할 수 있습니다. 실제 수집 대상은 서버 등록 목록이 결정합니다. 0.6.x 설치판은 기존 대상 계정의 정상 보고 응답으로 0.7.0 수집 코드를 자동으로 받습니다. 이미 다른 계정으로 전환해 보고를 건너뛰는 구버전은 새 패키지를 덮어 설치하세요. 설정 바로가기 등 추가 설치 파일을 쓰려면 새 패키지를 덮어 설치하세요.
 
 수집기는 세션 본문이나 원본 ID 대신 세션별 마지막 토큰 수와 공유 계정에 귀속된 누적 토큰 수만 로컬 `collector-state.json`에 기록합니다. Codex 로그인을 다른 계정으로 전환해도 기존 공유 계정 집계는 중앙 서버에 유지됩니다. 매 수집 시점의 토큰 증가분은 그때 로그인된 계정에 귀속되므로, 다른 계정으로 사용한 구간은 제외되고 공유 계정으로 다시 로그인한 뒤 사용한 증가분은 같은 세션이라도 계속 누적됩니다.
 
 Codex 내부 DB에는 세션별 계정 ID가 없으므로 수집기 설치 전의 혼합 계정 이력을 완벽히 소급 분리할 수는 없습니다. 첫 수집 당시 마지막 로그인보다 오래된 기존 기록은 초기값에서 제외하고, 이후 30초 간격으로 관찰되는 증가량부터 정확히 구분합니다. 2분을 넘는 수집 중단 구간과 시계가 뒤로 이동한 구간은 계정을 확정할 수 없으므로 누적 귀속 증가량에서도 제외합니다. 계정 전환 중 처음 발견한 세션은 해당 로그인 이후 생성된 경우에만 초기량을 귀속합니다.
+
+### 설치 후 전송 서버 변경
+
+수집기는 설정 JSON을 매 수집 주기마다 다시 읽으므로 재설치·재시작 없이 다음 수집부터 새 주소를 사용합니다. 새 서버의 수집 인증키가 다르면 그 서버에서 받은 인증키 파일도 지정하세요. 설정에는 URL과 인증키 **파일 경로**만 저장되고 인증키 본문은 출력하지 않습니다. 다른 서버의 인증키를 사용하면 계정 키와 로컬 귀속 상태도 그 인증키 기준으로 분리됩니다.
+
+Linux 새 설치판:
+
+```bash
+~/.local/share/codex-usage-collector/configure.sh --server http://NEW-SERVER:8765
+# 인증키도 바꾸는 경우
+~/.local/share/codex-usage-collector/configure.sh --server https://NEW-SERVER --token-file /path/to/new-collector.token
+```
+
+자동 업데이트만 받은 기존 Linux 설치판에서도 다음 명령으로 바꿀 수 있습니다.
+
+```bash
+python3 ~/.local/share/codex-usage-collector/collector.py --configure --server http://NEW-SERVER:8765
+python3 ~/.local/share/codex-usage-collector/collector.py --show-config
+```
+
+기본 설정 파일은 `~/.config/collector-config.json`입니다. 기존 `CODEX_MONITOR_SERVER` 환경변수보다 저장된 설정이 우선합니다. 직접 실행 시 `--config-file PATH`로 설정 위치를 지정할 수 있습니다.
+
+Windows 사용자 ZIP 설치판은 `%LOCALAPPDATA%\CodexUsageCollector\configure.cmd`를 실행하면 주소 입력창이 나옵니다. 명령으로 지정할 수도 있습니다.
+
+```powershell
+& "$env:LOCALAPPDATA\CodexUsageCollector\configure.ps1" -Server "http://NEW-SERVER:8765"
+```
+
+Windows 관리자 EXE 설치판은 설치 과정에서 서버 주소를 입력하고, 설치 후 시작 메뉴의 **Codex Usage Collector Settings**로 변경합니다. SYSTEM 작업 설정과 방화벽 포트 변경에는 관리자 권한이 필요합니다. 관리자 PowerShell에서 다음처럼 인증키 파일도 지정할 수 있습니다.
+
+```powershell
+& "C:\Program Files\Codex Usage Collector\configure.ps1" -Server "https://NEW-SERVER:9443" -TokenFile "C:\secure\new-collector.token"
+```
+
+Windows 사용자 설정은 `%APPDATA%\CodexUsageCollector\collector-config.json`, 관리자 설치판 설정은 `%PROGRAMDATA%\CodexUsageCollector\collector-config.json`에 저장됩니다. 기존 예약 작업의 고정 `--server` 인수보다 저장된 설정이 우선합니다. 자동 업데이트만 받은 관리자 설치판은 내장 `runtime\python.exe`로 `collector_windows_machine.py --token-file <기존 인증키 파일> --configure --server URL`을 실행해도 됩니다.
 
 ### Linux 단일 설치 패키지
 
@@ -190,14 +231,14 @@ make bundle
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.6.1-linux-user-provisioned.tar.gz
+dist/codex-usage-collector-0.7.0-linux-user-provisioned.tar.gz
 ```
 
 이 파일 하나를 대상 서버에 안전하게 전송한 뒤 해당 사용자로 설치합니다.
 
 ```bash
-tar -xzf codex-usage-collector-0.6.1-linux-user-provisioned.tar.gz
-cd codex-usage-collector-0.6.1
+tar -xzf codex-usage-collector-0.7.0-linux-user-provisioned.tar.gz
+cd codex-usage-collector-0.7.0
 sha256sum -c SHA256SUMS
 ./install.sh
 ```
@@ -215,7 +256,7 @@ make bundle-windows
 생성 파일:
 
 ```text
-dist/codex-usage-collector-0.6.1-windows-user-provisioned.zip
+dist/codex-usage-collector-0.7.0-windows-user-provisioned.zip
 ```
 
 대상 Windows PC에서 ZIP을 푼 후 `install.cmd`를 더블클릭합니다. 관리자 권한은 필요하지 않으며, 현재 Windows 사용자 이름으로 작업 스케줄러에 등록되어 로그인할 때 자동으로 실행됩니다. 제거할 때는 같은 폴더의 `uninstall.cmd`를 실행합니다.
@@ -225,7 +266,7 @@ Windows 설치 프로그램은 Python 3을 먼저 탐색하고, 없으면 `winge
 ### Windows 관리자 EXE 설치 — 권장
 
 ```text
-dist/codex-usage-collector-0.6.1-windows-machine-setup.exe
+dist/codex-usage-collector-0.7.0-windows-machine-setup.exe
 ```
 
 EXE를 실행하고 UAC 관리자 권한 요청을 승인하면 다음 작업이 모두 자동으로 이루어집니다.
@@ -261,7 +302,7 @@ make packages
 
 ## 비공개 GitHub Release
 
-이 저장소는 `v0.6.1`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
+이 저장소는 `v0.7.0`처럼 `v`로 시작하는 태그가 push되면 테스트, Linux/Windows 패키지 생성, Windows 관리자 EXE 생성 및 GitHub Release 게시를 자동으로 수행합니다. provisioned 패키지와 관리자 EXE에는 수집 인증키가 포함되므로 워크플로는 **비공개 저장소에서만** 실행됩니다.
 
 저장소 설정에 다음 값을 등록해야 합니다.
 
@@ -272,7 +313,7 @@ make packages
 릴리스할 때 `VERSION` 값을 올리고 동일한 버전의 태그를 push합니다.
 
 ```bash
-git tag v0.6.1
+git tag v0.7.0
 git push origin main --tags
 ```
 
@@ -282,6 +323,14 @@ GitHub에 올라간 provisioned 설치 파일은 저장소 접근 권한이 있�
 
 ```bash
 python3 -m unittest discover -s tests -v
+```
+
+브라우저 검증은 별도 터미널에서 임시 서버를 실행한 뒤 Chrome이 설치된 Linux에서 실행할 수 있습니다. 이 서버는 임시 DB와 테스트 인증키만 쓰고 10분 뒤 자동 종료됩니다.
+
+```bash
+python3 tests/serve_browser_fixture.py
+# 다른 터미널
+node tests/browser_accounts.cjs
 ```
 
 ## 현재 범위
