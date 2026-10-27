@@ -43,10 +43,16 @@ def observed_account_days(db, account_key, window):
            ORDER BY sampled_at""", (account_key, window.start, window.end),
     ):
         samples.setdefault(date_of(row["sampled_at"]).isoformat(), []).append(row["lifetime_tokens"])
-    return {
-        day: values[-1] - values[0] for day, values in samples.items()
-        if len(values) >= 2 and all(after >= before for before, after in zip(values, values[1:]))
-    }
+    result = {}
+    for day, values in samples.items():
+        correction = 0
+        for index in range(1, len(values)):
+            if values[index] < values[index - 1]:
+                correction = index
+        valid = values[correction:]
+        if len(valid) >= 2:
+            result[day] = valid[-1] - valid[0]
+    return result
 
 
 def calendar_report(start, end, now, account_days, events, sessions, visible, window=None, observed_days=None):

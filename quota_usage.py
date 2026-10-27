@@ -101,6 +101,8 @@ def build_quota_usage(weekly, samples, events, users, now, account_tokens=None, 
         day["unattributed_percent"] = max(0.0, day["used_percent"] - sum(day["users"].values()))
     for row in rows:
         row["observed_used_percent"] = row["used_percent"]
+        row["usage_status"] = "recorded" if row["tokens"] > 0 else "no_records"
+        row["quota_status"] = "observed_intervals" if row["used_percent"] is not None else "not_attributed"
         row["attribution_reason"] = (
             "계정 한도 증가와 단독 활동이 일치한 구간만 표시 · 주간 전체 사용률 아님"
             if row["used_percent"] is not None else

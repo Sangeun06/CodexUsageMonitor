@@ -46,9 +46,10 @@ function send(method,params={},sessionId) { return new Promise((resolve,reject)=
     assert.equal(await evaluate('state.data.summary.lifetime_tokens'),9000);
     assert.equal(await evaluate("document.getElementById('weeklyUsedPercent').textContent"), '3.125%');
     assert.equal(await evaluate("document.getElementById('weeklyRemainingPercent').textContent"), '96.875%');
-    assert.equal(await evaluate("document.getElementById('weeklyAttributedPercent').textContent"), '0.00%');
+    assert.equal(await evaluate("document.getElementById('weeklyAttributedPercent').textContent"), '사용 확인');
     assert.match(await evaluate("document.getElementById('quotaPlan').textContent"), /plus/);
-    assert.match(await evaluate("document.getElementById('comparisonList').textContent"), /개인별 실측 없음/);
+    assert.match(await evaluate("document.getElementById('comparisonList').textContent"), /사용 확인/);
+    assert.equal(await evaluate("document.querySelector('.comparison-meter .usage-known')?.textContent"), '사용 기록 있음 · 한도 비율 미확정');
     assert.match(await evaluate("document.getElementById('comparisonList').textContent"), /수집기 0.7.1 업데이트 대기/);
     assert.doesNotMatch(await evaluate("document.getElementById('comparisonList').textContent"), /보정 추정|잠정 추정/);
     assert.doesNotMatch(await evaluate("document.getElementById('comparisonList').textContent"), /확인 불가/);

@@ -130,6 +130,7 @@ h1, h2, p { margin-top: 0; } h1 { font-size: 19px; margin: 0; letter-spacing: -.
 .comparison-user small, .comparison-value small, .comparison-meter small { display: block; color: var(--muted); font-size: 9px; margin-top: 4px; }
 .comparison-meter > div { height: 7px; background: rgba(255,255,255,.05); border-radius: 999px; overflow: hidden; }
 .comparison-meter i { display: block; height: 100%; background: var(--green); border-radius: inherit; }
+.comparison-meter > .usage-known { height: auto; border-radius: 5px; padding: 6px 8px; color: var(--green-soft); font-size: 11px; background: rgba(85,230,165,.06); }
 .comparison-value { text-align: right; font-variant-numeric: tabular-nums; }
 .comparison-status { justify-self: end; border-radius: 999px; padding: 5px 8px; font-size: 9px; color: var(--green-soft); background: rgba(85,230,165,.07); border: 1px solid rgba(85,230,165,.14); }
 .comparison-status.high { color: #ffad8f; background: rgba(255,120,88,.07); border-color: rgba(255,120,88,.18); }

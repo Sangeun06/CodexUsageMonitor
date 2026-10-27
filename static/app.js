@@ -169,7 +169,9 @@ function renderQuotaContract(data) {
   $("quotaCapacityNote").textContent = contract
     ? "제공 한도는 서비스가 정의한 100%입니다. 현재 계정 응답은 100%에 해당하는 절대 토큰·크레딧량을 제공하지 않습니다."
     : "계정의 실제 한도 보고를 기다리는 중입니다.";
-  const recent = contract?.recent_changes?.find(item => item.status !== "insufficient_samples");
+  const available = contract?.recent_changes?.filter(item => item.status !== "insufficient_samples") || [];
+  const recent = available[0]?.status === "provider_correction" ? available[0]
+    : available.find(item => item.status === "reported_increase") || available[0];
   if (!recent) {
     $("recentAccountChange").textContent = "사용 전후 관측 대기";
     $("recentAccountRange").textContent = "서로 다른 시각의 한도 보고가 두 번 이상 필요합니다.";
@@ -196,7 +198,8 @@ function renderWeeklyBreakdown(data) {
   }
   $("weeklyUsedPercent").textContent = quotaLabel(quota.used_percent);
   $("weeklyRemainingPercent").textContent = quotaLabel(quota.remaining_percent);
-  $("weeklyAttributedPercent").textContent = quotaLabel(allocatedQuota(quota));
+  $("weeklyAttributedPercent").textContent = allocatedQuota(quota) === 0 && (quota.user_usage || []).some(user => user.tokens > 0)
+    ? "사용 확인" : quotaLabel(allocatedQuota(quota));
   $("weeklyUnattributedPercent").textContent = quotaLabel(unallocatedQuota(quota));
   const nodes = new Map((data.nodes || []).map(node => [node.key, node]));
   const colors = nodeColorMap(data.nodes || []);
@@ -217,7 +220,7 @@ function renderWeeklyBreakdown(data) {
     `<span style="width:${row.value.toFixed(4)}%;background:${row.color}" title="${escapeHtml(row.name)}: ${quotaLabel(row.value)}"></span>`
   ).join("");
   $("weeklyBreakdownStack").setAttribute("aria-label", `주간 제공량 100% 중 사용 ${quotaLabel(quota.used_percent)}, 남음 ${quotaLabel(quota.remaining_percent)}, 사용자 미귀속 ${quotaLabel(unallocatedQuota(quota))}`);
-  $("weeklyBreakdownLegend").innerHTML = rows.map(row => `<span><i style="background:${row.color}"></i><span class="weekly-share-name">${escapeHtml(row.name)}</span><strong>${row.value == null ? "개인별 실측 없음" : quotaLabel(row.value)}</strong><small>${escapeHtml(row.detail)}</small></span>`).join("");
+  $("weeklyBreakdownLegend").innerHTML = rows.map(row => `<span><i style="background:${row.color}"></i><span class="weekly-share-name">${escapeHtml(row.name)}</span><strong>${row.value == null ? "사용 확인" : quotaLabel(row.value)}</strong><small>${escapeHtml(row.detail)}</small></span>`).join("");
   $("weeklyBreakdownNote").textContent = `계정 실제 사용률은 ${quotaLabel(quota.used_percent)}입니다. 서비스가 제공하는 한도 사용률은 공유 계정 전체 값입니다. 사용자별 숫자는 단독 활동과 한도 증가가 일치한 관측 구간만 표시하며, 해당 사용자의 실제 주간 전체 사용률을 뜻하지 않습니다. 나머지는 사용자 미귀속으로 남깁니다. 토큰 수·계정 평균·다른 모델의 소모율로 개인별 사용률을 만들어 내지 않습니다. 요청별 모델·추론 강도·캐시·출력 내역은 아래 로그 상세에서 확인할 수 있습니다.`;
 
 }
@@ -244,9 +247,9 @@ function renderComparison(data) {
   rows.push({ name: "사용자 미귀속", detail: "개인에게 임의 배분하지 않은 계정 사용분", value: unallocatedQuota(quota), untracked: true });
   $("comparisonList").innerHTML = rows.map(item => `<article class="comparison-row">
     <div class="comparison-user"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.detail)}</small></div>
-    <div class="comparison-meter"><div><i style="width:${item.value ?? 0}%;${item.untracked ? "background:var(--amber)" : ""}"></i></div><small>${escapeHtml(item.reason || "동시 사용·관측 전 내역은 미귀속으로 유지")}</small></div>
-    <div class="comparison-value"><strong>${item.value == null ? "개인별 실측 없음" : quotaLabel(item.value)}</strong><small>${item.tokens == null ? "사용자 귀속 불가" : `${number.format(item.tokens)} 토큰 · 처리량 참고`}</small></div>
-    <span class="comparison-status normal">${item.untracked ? "미귀속" : item.value == null ? "한도 실측 미제공" : "관측 구간만"}</span>
+    <div class="comparison-meter">${item.value == null ? '<div class="usage-known">사용 기록 있음 · 한도 비율 미확정</div>' : `<div><i style="width:${item.value}%;${item.untracked ? "background:var(--amber)" : ""}"></i></div>`}<small>${escapeHtml(item.reason || "동시 사용·관측 전 내역은 미귀속으로 유지")}</small></div>
+    <div class="comparison-value"><strong>${item.value == null ? "사용 확인" : quotaLabel(item.value)}</strong><small>${item.tokens == null ? "사용자 귀속 불가" : `${number.format(item.tokens)} 토큰 · 처리량 참고`}</small></div>
+    <span class="comparison-status normal">${item.untracked ? "미귀속" : item.value == null ? "한도 비율 미확정" : "관측 구간만"}</span>
     ${item.untracked ? "" : renderUsageEvidence(item)}
   </article>`).join("");
 }

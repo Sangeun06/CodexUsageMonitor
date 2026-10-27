@@ -139,12 +139,14 @@ test("old token-derived percentages are ignored when personal measurement is mis
   const elements = render({user_usage: [{node_key: "a", tokens: 1000000, used_percent: null,
     estimated_used_percent: 42, observed_used_percent: 0, estimate_method: "account_average"}],
     attributed_percent: 0, unattributed_percent: 20, estimated_attributed_percent: 42});
-  assert.match(elements.get("comparisonList").innerHTML, /개인별 실측 없음/);
+  assert.match(elements.get("comparisonList").innerHTML, /사용 확인/);
+  assert.match(elements.get("comparisonList").innerHTML, /사용 기록 있음 · 한도 비율 미확정/);
   assert.doesNotMatch(elements.get("comparisonList").innerHTML, /42\.00%/);
-  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /개인별 실측 없음/);
-  assert.equal(elements.get("weeklyAttributedPercent").textContent, "0.00%");
+  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /사용 확인/);
+  assert.equal(elements.get("weeklyAttributedPercent").textContent, "사용 확인");
   assert.equal(elements.get("weeklyUnattributedPercent").textContent, "20.00%");
   assert.doesNotMatch(elements.get("weeklyBreakdownStack").innerHTML, /NaN|Infinity|width:42/);
+  assert.doesNotMatch(elements.get("comparisonList").innerHTML.split('</article>')[0], /width:0%/);
 });
 
 test("missing weekly limits clear previous quota and comparison", () => {
@@ -183,4 +185,7 @@ test("actual plan and recent account change use provider values without a guesse
   assert.match(elements.get('recentAccountChange').textContent, /변동 없음/);
   assert.doesNotMatch(elements.get('recentAccountChange').textContent, /0\.00%/);
   assert.match(elements.get('recentAccountRange').textContent, /실제 사용량 0으로 판정하지/);
+  contract.recent_changes.push({...contract.recent_changes[0], status: 'reported_increase', change_percent_points: 1});
+  context.renderQuotaContract({weekly_quota: {account_quota: contract}});
+  assert.match(elements.get('recentAccountChange').textContent, /1\.00%p/);
 });

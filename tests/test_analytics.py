@@ -127,3 +127,12 @@ class CalendarAnalyticsTest(unittest.TestCase):
                 (at + 1, 100), (at + 2, 90), (at + 86400, 200),
             ])
             self.assertEqual(observed_account_days(db, "account", UsageWindow(at, self.now)), {})
+
+    def test_daily_counter_growth_resumes_after_a_provider_correction(self):
+        with sqlite3.connect(":memory:") as db:
+            db.row_factory = sqlite3.Row
+            db.execute("CREATE TABLE account_token_samples (account_key TEXT, sampled_at INTEGER, lifetime_tokens INTEGER)")
+            at = timestamp(date(2026, 10, 5))
+            db.executemany("INSERT INTO account_token_samples VALUES ('account',?,?)",
+                           [(at+1, 1000), (at+2, 900), (at+3, 925)])
+            self.assertEqual(observed_account_days(db, "account", UsageWindow(at, self.now)), {"2026-10-05": 25})

@@ -81,9 +81,19 @@ test('weekly quota charts and inspector share actual allowance percentages', () 
 test('token-only dates keep missing quota unknown rather than drawing token shares', () => {
   const report = quotaReport({ days: [day], overview: {...day, scope: 'weekly'} }, null);
   assert.deepEqual(segments(report.days[0]), []);
-  assert.match(chartMarkup(report.days, colors, day.date), /missing-bar/);
-  assert.match(breakdownRows(report.days[0], new Map(), colors), /한도 관측 없음/);
+  assert.match(chartMarkup(report.days, colors, day.date), /usage-activity-marker/);
+  assert.match(breakdownRows(report.days[0], new Map(), colors), /사용 확인 · 비율 미확정/);
   assert.doesNotMatch(donutMarkup(report.overview, colors), /stroke-dasharray/);
+  assert.match(donutMarkup(report.days[0], colors), /사용 확인/);
+  assert.doesNotMatch(donutMarkup(report.days[0], colors), />0\.00%</);
+});
+
+test('positive usage logs are not shown as zero when the provider percentage is unchanged', () => {
+  const unchanged = {...day, unit: 'quota_percent', quota: {used_percent: 0, users: {}, unattributed_percent: 0}};
+  assert.match(chartMarkup([unchanged], colors, day.date), /usage-activity-marker/);
+  assert.doesNotMatch(chartMarkup([unchanged], colors, day.date), /관측 한도 증가 0%/);
+  assert.match(donutMarkup(unchanged, colors), /사용 확인/);
+  assert.doesNotMatch(donutMarkup(unchanged, colors), />0\.00%</);
 });
 
 test('weekly inspector ignores obsolete token-derived estimates', () => {

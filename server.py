@@ -756,9 +756,17 @@ class UsageStore:
         if current is not None:
             if usage["observed_at"] < current["observed_at"]:
                 return
-            if lifetime is not None and current["lifetime_tokens"] is not None and lifetime < current["lifetime_tokens"]:
+            if usage["observed_at"] == current["observed_at"] and lifetime is not None and current["lifetime_tokens"] is not None and lifetime < current["lifetime_tokens"]:
                 return
             previous = json.loads(current["usage_json"])
+            # Provider counters can be corrected downward independently of the
+            # live quota meter. Freshness comes from the observation timestamp,
+            # never from assuming that lifetime tokens are strictly monotonic.
+            if lifetime is not None and current["lifetime_tokens"] is not None and lifetime < current["lifetime_tokens"]:
+                usage["counter_correction"] = {
+                    "previous_tokens": current["lifetime_tokens"], "reported_tokens": lifetime,
+                    "observed_at": usage["observed_at"],
+                }
             usage["summary"] = {
                 field: value if value is not None else previous.get("summary", {}).get(field)
                 for field, value in usage["summary"].items()
@@ -1276,7 +1284,12 @@ class UsageStore:
                 "lifetime_tokens": lifetime_tokens,
                 "weekly_account_tokens": weekly_account_tokens,
                 "session_tokens": session_total,
-                "account_usage_available": lifetime_tokens is not None,
+                "account_usage_available": bool(account_usage and (
+                    lifetime_tokens is not None or account_usage.get("rate_limits") or account_usage.get("daily_usage")
+                )),
+                "account_token_usage_available": lifetime_tokens is not None,
+                "known_usage_present": bool((lifetime_tokens or 0) > 0 or session_total > 0
+                                            or (weekly_usage or {}).get("used_percent", 0) > 0),
                 "session_count": len(sessions),
                 "active_count": sum(session["active"] for session in sessions),
                 "project_count": len({session["project_key"] for session in sessions}),

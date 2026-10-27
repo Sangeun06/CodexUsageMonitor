@@ -89,12 +89,24 @@ class UsageStoreTest(unittest.TestCase):
 
     def test_stale_account_report_does_not_change_weekly_history(self):
         self.store.ingest(self.report(lifetime=1000), now=1_000_000)
-        stale = self.report(lifetime=900)
+        stale = self.report(lifetime=900, observed_at=999999)
         stale["account_usage"]["rate_limits"][0]["primary"]["used_percent"] = 5
         self.store.ingest(stale, now=1_000_030)
         weekly = self.store.dashboard(now=1_000_030)["weekly_usage"]
         self.assertEqual(weekly["used_percent"], 20)
         self.assertEqual(weekly["points"][-1]["used_percent"], 20)
+
+    def test_fresh_counter_correction_keeps_live_quota_updates_and_current_usage(self):
+        self.store.ingest(self.report(lifetime=1000, observed_at=1000000), now=1000000)
+        fresh = self.report(lifetime=900, observed_at=1000030)
+        fresh["account_usage"]["rate_limits"][0]["primary"]["used_percent"] = 21
+        self.store.ingest(fresh, now=1000030)
+        data = self.store.dashboard(now=1000030)
+        self.assertEqual(data["weekly_usage"]["used_percent"], 21)
+        self.assertEqual(data["weekly_usage"]["points"][-1]["used_percent"], 21)
+        self.assertEqual(data["account_usage"]["summary"]["lifetime_tokens"], 900)
+        self.assertEqual(data["account_usage"]["counter_correction"]["previous_tokens"], 1000)
+        self.assertEqual(data["account_usage"]["received_at"], "1970-01-12T13:47:10Z")
 
     def test_delayed_report_with_equal_lifetime_cannot_revert_weekly_reset(self):
         latest = self.report(observed_at=1_100_010)

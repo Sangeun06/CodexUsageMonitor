@@ -9,7 +9,9 @@ const AnalyticsView = (() => {
   const isQuota = day => day?.unit === "quota_percent";
   const formatPercent = typeof module !== "undefined" && module.exports ? require("./usage-view.js").formatPercent : UsageView.formatPercent;
   const percent = value => formatPercent(value, "한도 관측 없음");
-  const quotaSummary = day => `${day.scope === "weekly" ? "주간 실제 사용" : "당일 관측 소모"} ${percent(day.quota?.used_percent)}`;
+  const quotaSummary = day => day.total_tokens > 0 && !(day.quota?.used_percent > 0)
+    ? `사용 기록 ${amount(day.total_tokens)} 토큰 · 한도 비율 미확정`
+    : `${day.scope === "weekly" ? "주간 실제 사용" : "당일 관측 소모"} ${percent(day.quota?.used_percent)}`;
 
   function quotaReport(report, quota) {
     if (!report) return null;
@@ -60,7 +62,8 @@ const AnalyticsView = (() => {
         accumulated += height;
         return `<rect x="${middle - barWidth / 2}" y="${bottom - accumulated}" width="${barWidth}" height="${height}" fill="${colors.get(part.key) || "#f4c96b"}"/>`;
       }).join("");
-      const empty = parts ? "" : (quotaMode ? day.quota?.used_percent === 0 : day.account_tokens === 0)
+      const activity = quotaMode && day.total_tokens > 0 && !parts;
+      const empty = activity ? `<path d="M ${middle} ${bottom - 15} l 6 6 l -6 6 l -6 -6 Z" fill="#55e6a5" class="usage-activity-marker"><title>사용 기록 ${amount(day.total_tokens)} 토큰 · 한도 비율 미확정</title></path>` : parts ? "" : (quotaMode ? day.quota?.used_percent === 0 : day.account_tokens === 0)
         ? `<circle cx="${middle}" cy="${bottom - 3}" r="3" fill="#a3b0bd"><title>${quotaMode ? "관측 한도 증가 0%" : "계정 보고량 0"}</title></circle>`
         : `<line x1="${middle - barWidth / 2}" x2="${middle + barWidth / 2}" y1="${bottom - 2}" y2="${bottom - 2}" class="missing-bar"/>`;
       const tick = days.length <= 10 || index % 3 === 0 || index === days.length - 1;
@@ -79,7 +82,7 @@ const AnalyticsView = (() => {
       for (const [key, tokens] of Object.entries(day.users || {})) {
         if (tokens > 0 && !known.has(key)) parts.push({ key, tokens, share: day.quota?.users?.[key] ?? null });
       }
-      return parts.map(part => `<tr><td><span class="color-dot" style="background:${colors.get(part.key) || (part.key === "__remaining" ? "#3d4855" : "#f4c96b")}"></span>${part.key === "__untracked" ? "사용자 미귀속" : part.key === "__remaining" ? "남은 한도" : esc(label(part.key, nodes))}</td><td>${part.tokens == null ? "—" : fmt.format(part.tokens)}</td><td>${percent(part.share)}</td></tr>`).join("") || '<tr><td colspan="3">한도 관측 기록을 기다리는 중입니다.</td></tr>';
+      return parts.map(part => `<tr><td><span class="color-dot" style="background:${colors.get(part.key) || (part.key === "__remaining" ? "#3d4855" : "#f4c96b")}"></span>${part.key === "__untracked" ? "사용자 미귀속" : part.key === "__remaining" ? "남은 한도" : esc(label(part.key, nodes))}</td><td>${part.tokens == null ? "—" : fmt.format(part.tokens)}</td><td>${part.share == null && part.tokens > 0 ? "사용 확인 · 비율 미확정" : percent(part.share)}</td></tr>`).join("") || '<tr><td colspan="3">한도 관측 기록을 기다리는 중입니다.</td></tr>';
     }
     return segments(day).map(part => `<tr><td><span class="color-dot" style="background:${colors.get(part.key) || "#f4c96b"}"></span><span title="${esc(label(part.key, nodes))}">${part.key === "__untracked" ? "미귀속 / 미확인" : esc(label(part.key, nodes))}</span></td><td>${fmt.format(part.tokens)}</td><td>${formatPercent(part.share, "계산 대기")}</td></tr>`).join("") || `<tr><td colspan="3">${day.account_tokens === 0 ? "계정 보고량 0 · 확인된 사용자 사용량 없음" : "사용자를 확인할 기록이 없습니다."}</td></tr>`;
   }
@@ -91,7 +94,10 @@ const AnalyticsView = (() => {
       offset += part.share;
       return circle;
     }).join("");
-    if (isQuota(day)) return `<svg viewBox="0 0 180 180" role="img" aria-label="${esc(quotaSummary(day))} · 제공 한도 100% 기준"><circle cx="90" cy="90" r="68" fill="none" stroke="var(--line)" stroke-width="22"/>${slices}<text x="90" y="87" text-anchor="middle" class="donut-value">${percent(day.quota?.used_percent)}</text><text x="90" y="108" text-anchor="middle" class="donut-caption">${day.scope === "weekly" ? "주간 실제 사용" : "당일 관측 소모"}</text></svg>`;
+    if (isQuota(day)) {
+      const recorded = day.total_tokens > 0 && !(day.quota?.used_percent > 0);
+      return `<svg viewBox="0 0 180 180" role="img" aria-label="${esc(quotaSummary(day))} · 제공 한도 100% 기준"><circle cx="90" cy="90" r="68" fill="none" stroke="var(--line)" stroke-width="22"/>${slices}<text x="90" y="87" text-anchor="middle" class="donut-value">${recorded ? "사용 확인" : percent(day.quota?.used_percent)}</text><text x="90" y="108" text-anchor="middle" class="donut-caption">${recorded ? "한도 비율 미확정" : day.scope === "weekly" ? "주간 실제 사용" : "당일 관측 소모"}</text></svg>`;
+    }
     const total = day.comparable ? day.account_tokens : (day.total_tokens > 0 ? day.total_tokens : null);
     return `<svg viewBox="0 0 180 180" role="img" aria-label="${esc(day.scope === "weekly" ? "주간 전체" : day.date)} 사용자별 구성 · ${day.comparable ? accountLabel(day) : "사용자 확인량만"} ${amount(total)} 토큰"><circle cx="90" cy="90" r="68" fill="none" stroke="var(--line)" stroke-width="22"/>${slices}<text x="90" y="87" text-anchor="middle" class="donut-value">${total == null ? "—" : esc(compact.format(total))}</text><text x="90" y="108" text-anchor="middle" class="donut-caption">${day.comparable ? accountLabel(day) : "사용자 확인량"}</text></svg>`;
   }
