@@ -531,6 +531,7 @@ class UsageStore:
             allowed = db.execute("SELECT 1 FROM monitored_accounts WHERE account_key=? AND enabled=1", (account_key,)).fetchone()
         if not allowed:
             raise ValueError("account is not registered for this monitor")
+        collector_info = payload.get("collector") or {}
         raw_receipts = payload.get("alert_receipts") or []
         if not isinstance(raw_receipts, list) or len(raw_receipts) > 200:
             raise ValueError("invalid alert receipts")
@@ -589,6 +590,16 @@ class UsageStore:
                 if len(clean_details) > 50_000:
                     raise ValueError("too many usage details")
         with self._lock, self._connect_monitor() as db:
+            if isinstance(collector_info, dict) and collector_info.get("kind") == "user":
+                machine = db.execute(
+                    "SELECT kind,received_at FROM collector_usage_metadata WHERE account_key=? AND node_key=?",
+                    (account_key, node["key"]),
+                ).fetchone()
+                # Machine and user tasks scan the same Windows profile. Check
+                # preference under the write lock so simultaneous reports
+                # cannot replace a fresh machine report with a legacy one.
+                if machine is not None and machine["kind"] == "windows-machine" and 0 <= now - machine["received_at"] <= max(90, self.config.interval * 6):
+                    return
             db.execute("PRAGMA foreign_keys=ON")
             db.execute(
                 """INSERT INTO collector_nodes (node_key, hostname, os_user, account_json, seen_at)
@@ -638,7 +649,6 @@ class UsageStore:
                        tokens_used=MAX(tokens_used,excluded.tokens_used)""",
                     (account_key, node["key"], now - 14 * 86400),
                 )
-            collector_info = payload.get("collector") or {}
             if isinstance(collector_info, dict):
                 pending = sum(session.get("usage_detail_backfill_complete") is False for session in sessions)
                 db.execute("INSERT OR REPLACE INTO collector_usage_metadata (account_key,node_key,version,backfill_pending,received_at,kind) VALUES (?,?,?,?,?,?)",

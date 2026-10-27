@@ -782,6 +782,33 @@ class UsageStoreTest(unittest.TestCase):
         self.assertEqual(user["usage_details"][0]["cached_input_tokens"], 990)
         self.assertEqual(user["collector_metadata"]["version"], "0.7.1")
 
+    def test_active_machine_collector_keeps_a_legacy_user_task_from_replacing_its_report(self):
+        machine = self.report(tokens=100)
+        machine["collector"] = {"version": "0.7.1", "kind": "windows-machine"}
+        legacy = self.report(tokens=999999)
+        legacy["collector"] = {"version": "0.7.4", "kind": "user"}
+        self.store.ingest(machine, now=1000000)
+        self.store.ingest(legacy, now=1000030)
+        with closing(sqlite3.connect(self.monitor)) as db:
+            self.assertEqual(db.execute("SELECT tokens_used FROM collector_sessions WHERE node_key='node-a'").fetchone()[0], 100)
+            self.assertEqual(db.execute("SELECT kind FROM collector_usage_metadata WHERE node_key='node-a'").fetchone()[0], "windows-machine")
+        # A stopped machine task must not permanently suppress the user task.
+        self.store.ingest(legacy, now=1000200)
+        with closing(sqlite3.connect(self.monitor)) as db:
+            self.assertEqual(db.execute("SELECT tokens_used FROM collector_sessions WHERE node_key='node-a'").fetchone()[0], 999999)
+
+    def test_machine_preference_does_not_block_another_account_on_the_same_node(self):
+        self.store.save_account("bbbbbbbbbbbb")
+        machine = self.report(tokens=100)
+        machine["collector"] = {"version": "0.7.1", "kind": "windows-machine"}
+        other = self.report(tokens=200)
+        other["account"]["key"] = "bbbbbbbbbbbb"
+        other["collector"] = {"version": "0.7.4", "kind": "user"}
+        self.store.ingest(machine, now=1000000)
+        self.store.ingest(other, now=1000030)
+        with closing(sqlite3.connect(self.monitor)) as db:
+            self.assertEqual(db.execute("SELECT tokens_used FROM collector_sessions WHERE account_key='bbbbbbbbbbbb'").fetchone()[0], 200)
+
     def test_weekly_usage_history_starts_over_without_resetting_total_processed(self):
         def report(used_percent, resets_at, lifetime=5000):
             return {
