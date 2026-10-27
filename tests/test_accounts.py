@@ -73,6 +73,18 @@ class AccountsTest(unittest.TestCase):
                 self.assertEqual(self.store.read_account_usage()["summary"]["lifetime_tokens"], 555)
         self.assertEqual(UsageStore(self.config).collector_account_key(), A)
 
+    def test_account_percentages_stay_independent_of_token_volume_and_other_accounts(self):
+        for key, tokens, percent in ((A, 1_000_000, 2), (B, 10, 80)):
+            report = self.report(key, tokens, tokens, 1000030)
+            report["account_usage"]["rate_limits"][0]["primary"]["used_percent"] = percent
+            self.store.ingest(report, now=1000030)
+        for key, expected in ((A, 2), (B, 80)):
+            quota = self.store.dashboard(now=1000100, account_key=key)["weekly_quota"]
+            self.assertEqual(quota["used_percent"], expected)
+            self.assertEqual(quota["remaining_percent"], 100 - expected)
+            self.assertEqual(quota["unattributed_percent"], expected)
+            self.assertEqual(quota["attributed_percent"], 0)
+
     def test_raw_local_database_is_not_used_for_multiple_accounts(self):
         with patch.object(self.store, "read_account", return_value={"key": A}), patch.object(self.store, "read_sessions") as raw:
             self.assertEqual(self.store.read_current_sessions(1000000), ([], []))

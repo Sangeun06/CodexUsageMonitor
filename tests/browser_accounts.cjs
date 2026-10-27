@@ -29,10 +29,27 @@ function send(method,params={},sessionId) { return new Promise((resolve,reject)=
     await wait("document.getElementById('connectionText')?.textContent==='모니터 서버 연결됨'");
     const initial=await evaluate("({account:state.accountKey,sessionTokens:state.data.summary.session_tokens,options:document.getElementById('monitorAccountSelect').options.length})");
     assert.deepEqual(initial,{account:'aaaaaaaaaaaa',sessionTokens:100,options:2});
+    assert.equal(await evaluate("document.getElementById('weeklyUsedPercent').textContent"), '20.00%');
+    assert.equal(await evaluate("document.getElementById('weeklyRemainingPercent').textContent"), '80.00%');
+    assert.equal(await evaluate("document.getElementById('weeklyAttributedPercent').textContent"), '15.00%');
+    assert.match(await evaluate("document.getElementById('weeklyDayRows').textContent"), /15\.00%/);
+    assert.match(await evaluate("document.getElementById('weeklyDonut').textContent"), /20\.00%/);
+    await evaluate("document.querySelector('.usage-evidence').open=true");
+    assert.match(await evaluate("document.querySelector('.usage-evidence').textContent"), /small-model/);
+    assert.match(await evaluate("document.querySelector('.usage-evidence').textContent"), /캐시 입력/);
+    assert.match(await evaluate("document.querySelector('.usage-evidence').textContent"), /low/);
     await evaluate("document.getElementById('monitorAccountSelect').value='bbbbbbbbbbbb';document.getElementById('monitorAccountSelect').dispatchEvent(new Event('change'))");
     await wait("state.accountKey==='bbbbbbbbbbbb' && !state.refreshing");
     assert.equal(await evaluate('state.data.summary.session_tokens'),700);
     assert.equal(await evaluate('state.data.summary.lifetime_tokens'),9000);
+    assert.equal(await evaluate("document.getElementById('weeklyUsedPercent').textContent"), '3.125%');
+    assert.equal(await evaluate("document.getElementById('weeklyRemainingPercent').textContent"), '96.875%');
+    assert.equal(await evaluate("document.getElementById('weeklyAttributedPercent').textContent"), '0.00%');
+    assert.match(await evaluate("document.getElementById('comparisonList').textContent"), /개인별 실측 없음/);
+    assert.match(await evaluate("document.getElementById('comparisonList').textContent"), /수집기 0.7.1 업데이트 대기/);
+    assert.doesNotMatch(await evaluate("document.getElementById('comparisonList').textContent"), /보정 추정|잠정 추정/);
+    assert.doesNotMatch(await evaluate("document.getElementById('comparisonList').textContent"), /확인 불가/);
+    assert.match(await evaluate("document.getElementById('weeklyDayRows').textContent"), /3\.125%/);
     // Reordered requests must leave the most recent account selected.
     await evaluate(`window.originalFetch=window.fetch;window.fetch=async(...args)=>{if(String(args[0]).includes('account_key=aaaaaaaaaaaa'))await new Promise(r=>setTimeout(r,300));return window.originalFetch(...args)};const select=document.getElementById('monitorAccountSelect');select.value='aaaaaaaaaaaa';select.dispatchEvent(new Event('change'));select.value='bbbbbbbbbbbb';select.dispatchEvent(new Event('change'))`);
     await wait('!state.refreshing');await evaluate('new Promise(r=>setTimeout(r,450))');
@@ -53,7 +70,9 @@ function send(method,params={},sessionId) { return new Promise((resolve,reject)=
     await call('Page.reload');await wait("document.getElementById('connectionText')?.textContent==='모니터 서버 연결됨'");
     assert.equal(await evaluate('state.accountKey'),'cccccccccccc');
     assert.equal(await evaluate('state.data.summary.session_tokens'),0);
+    assert.equal(await evaluate("document.getElementById('weeklyUsedPercent').textContent"), '—');
+    assert.equal(await evaluate("document.getElementById('weeklyBreakdownStack').textContent"), '');
     assert.deepEqual(errors,[]);
-    console.log('PASS: account switching, stale response protection, registration, pause/history, persistent default, mobile, reload; JS errors = 0');
+    console.log('PASS: actual quota %, allowance denominator, quota attribution, account switching, stale response protection, registration, pause/history, persistent default, mobile, reload; JS errors = 0');
   } finally {await send('Browser.close').catch(()=>{});chrome.kill();chrome.stdio[2].destroy();chrome.stdio[3].destroy();chrome.stdio[4].destroy();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { segments, chartMarkup, donutMarkup, breakdownRows } = require('../static/analytics-view.js');
+const { segments, chartMarkup, donutMarkup, breakdownRows, quotaReport } = require('../static/analytics-view.js');
 const colors = new Map([['a', '#00cc99'], ['b', '#cc99ff']]);
 const day = { date: '2026-10-06', users: { a: 100, b: 200 }, total_tokens: 300, account_tokens: 1000, untracked_tokens: 700, comparable: true };
 
@@ -45,7 +45,7 @@ test('weekly overview includes undated users and the canonical untracked share',
   const overview = { ...day, date: '__weekly', scope: 'weekly' };
   assert.deepEqual(segments(overview).map(part => part.share), [20, 10, 70]);
   assert.match(donutMarkup(overview, colors), /주간 전체 집계량/);
-  assert.match(breakdownRows(overview, new Map(), colors), /700<\/td><td>70\.0%/);
+  assert.match(breakdownRows(overview, new Map(), colors), /700<\/td><td>70\.00%/);
   assert.match(chartMarkup([day], colors, '__weekly'), /tabindex="0"/);
 });
 test('weekly overview with an unknown denominator does not normalize users to 100%', () => {
@@ -60,4 +60,37 @@ test('observed growth exposes dated untracked usage as an explicitly labelled lo
   assert.match(svg, /계정 관측 최소량 1,000/);
   assert.match(svg, /fill="#f4c96b"/);
   assert.match(donutMarkup(observed, colors), /계정 관측 최소량/);
+});
+
+test('weekly quota charts and inspector share actual allowance percentages', () => {
+  const quota = { used_percent: 10, remaining_percent: 90, unattributed_percent: 5,
+    user_usage: [{node_key: 'a', used_percent: 1}, {node_key: 'b', used_percent: 4}],
+    days: { '2026-10-06': { used_percent: 5, unattributed_percent: 0, users: {a: 1, b: 4} } } };
+  const report = quotaReport({ days: [day], overview: {...day, scope: 'weekly', date: '__weekly'} }, quota);
+  const overview = report.overview;
+  assert.deepEqual(segments(overview).map(part => part.share), [4, 1, 5, 90]);
+  assert.match(donutMarkup(overview, colors), /10\.00%/);
+  assert.match(breakdownRows(overview, new Map(), colors), /100<\/td><td>1\.00%/);
+  const daily = report.days[0];
+  assert.deepEqual(segments(daily).map(part => part.share), [4, 1]);
+  assert.match(chartMarkup([daily], colors, daily.date), /5\.00%/);
+  assert.match(donutMarkup(daily, colors), /당일 관측 소모/);
+  assert.doesNotMatch(donutMarkup(daily, colors), /stroke-dasharray="80/);
+});
+
+test('token-only dates keep missing quota unknown rather than drawing token shares', () => {
+  const report = quotaReport({ days: [day], overview: {...day, scope: 'weekly'} }, null);
+  assert.deepEqual(segments(report.days[0]), []);
+  assert.match(chartMarkup(report.days, colors, day.date), /missing-bar/);
+  assert.match(breakdownRows(report.days[0], new Map(), colors), /한도 관측 없음/);
+  assert.doesNotMatch(donutMarkup(report.overview, colors), /stroke-dasharray/);
+});
+
+test('weekly inspector ignores obsolete token-derived estimates', () => {
+  const quota = {used_percent: 20, remaining_percent: 80, unattributed_percent: 20,
+    estimated_unattributed_percent: 2, days: {},
+    user_usage: [{node_key: 'a', used_percent: null, estimated_used_percent: 18}]};
+  const report = quotaReport({days: [], overview: {...day, scope: 'weekly', date: '__weekly'}}, quota);
+  assert.deepEqual(segments(report.overview).map(part => part.share), [20, 80]);
+  assert.doesNotMatch(breakdownRows(report.overview, new Map(), colors), /18\.00%/);
 });

@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_LOG_BACKUPS = 3
 APP_SERVER_TIMEOUT_SECONDS = 15
-COLLECTOR_VERSION = "0.7.0"
+COLLECTOR_VERSION = "0.7.1"
 UPDATE_FILE_NAMES = {"collector.py", "collector_windows_machine.py"}
 
 
@@ -79,6 +79,8 @@ def read_account(auth_file: Path, token: str) -> dict[str, Any]:
 
 def _read_rollout_usage_buckets(
     rollout_path: Any, cutoff: int, offset: int, previous_total: int | None = None,
+    details: list[dict[str, Any]] | None = None, context: dict[str, str] | None = None,
+    stop_offset: int | None = None, max_bytes: int | None = None,
 ) -> tuple[list[dict[str, int]], int, int | None]:
     if not rollout_path:
         return [], offset, previous_total
@@ -86,6 +88,7 @@ def _read_rollout_usage_buckets(
     if not path.is_file():
         return [], offset, previous_total
     buckets: dict[int, int] = {}
+    context = context if context is not None else {}
     initial_total = previous_total
     try:
         size = path.stat().st_size
@@ -94,6 +97,10 @@ def _read_rollout_usage_buckets(
         with path.open("rb") as stream:
             stream.seek(offset)
             while True:
+                if stop_offset is not None and stream.tell() >= stop_offset:
+                    break
+                if max_bytes is not None and stream.tell() - offset >= max_bytes:
+                    break
                 line_start = stream.tell()
                 line = stream.readline()
                 if not line:
@@ -108,6 +115,22 @@ def _read_rollout_usage_buckets(
                 if not isinstance(event, dict):
                     continue
                 payload = event.get("payload")
+                if event.get("type") == "turn_context" and isinstance(payload, dict):
+                    # Only whitelisted execution metadata, never instructions,
+                    # paths, approval policies, or other turn context contents.
+                    model = payload.get("model")
+                    context.clear()
+                    if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", model):
+                        context["model"] = model
+                    for field, choices in (
+                        ("effort", {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}),
+                        ("service_tier", {"auto", "default", "standard", "priority", "fast", "ultrafast", "flex"}),
+                        ("reasoning_mode", {"standard", "pro"}),
+                    ):
+                        value = payload.get(field, payload.get("reasoning_effort") if field == "effort" else None)
+                        if isinstance(value, str) and value in choices:
+                            context[field] = value
+                    continue
                 if event.get("type") != "event_msg" or not isinstance(payload, dict):
                     continue
                 if payload.get("type") != "token_count":
@@ -131,6 +154,15 @@ def _read_rollout_usage_buckets(
                     continue
                 bucket_at = occurred_at - occurred_at % 60
                 buckets[bucket_at] = buckets.get(bucket_at, 0) + tokens
+                if details is not None:
+                    detail = {field: _optional_nonnegative_int(usage.get(field)) for field in (
+                        "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens",
+                    )}
+                    detail.update(at=bucket_at, tokens=tokens, events=1,
+                                  model=context.get("model", "unknown"), effort=context.get("effort", "unknown"),
+                                  service_tier=context.get("service_tier", "unknown"),
+                                  reasoning_mode=context.get("reasoning_mode", "unknown"))
+                    details.append(detail)
             next_offset = stream.tell()
     except OSError:
         return [], offset, initial_total
@@ -434,6 +466,19 @@ def attach_account_usage(payload: dict[str, Any], codex_home: Path) -> None:
     payload["account_usage"] = live["usage"]
 
 
+def _merge_usage_detail(target: dict[str, Any], detail: dict[str, Any]) -> None:
+    key = "|".join(str(detail[field]) for field in ("at", "model", "effort", "service_tier", "reasoning_mode"))
+    previous = target.get(key)
+    if previous is None:
+        target[key] = dict(detail)
+        return
+    combined = dict(detail)
+    for field in ("tokens", "events", "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"):
+        before, after = previous.get(field), detail.get(field)
+        combined[field] = before + after if before is not None and after is not None else None
+    target[key] = combined
+
+
 def track_target_usage(
     sessions: list[dict[str, Any]],
     current_account_key: str,
@@ -495,6 +540,7 @@ def track_target_usage(
         # sleep, service downtime, or another long observation gap.
         intervals.append({"start": scan_at, "end": scan_at, "account_key": current_account_key})
 
+    backfill_budget = 32 * 1024 * 1024
     for session in sessions:
         session_key = str(session["key"])
         current_tokens = max(0, int(session.get("tokens") or 0))
@@ -546,6 +592,10 @@ def track_target_usage(
             for at, tokens in candidates.items()
             if str(at).isdigit() and int(at) >= cutoff and int(tokens) >= 0
         }
+        detail_pending = {key: value for key, value in (record.get("usage_details") or {}).items()
+                          if isinstance(value, dict) and int(value.get("at") or 0) >= cutoff}
+        detail_candidates = {key: value for key, value in (record.get("detail_candidates") or {}).items()
+                             if isinstance(value, dict) and int(value.get("at") or 0) >= cutoff}
         if rollout_path:
             path = Path(str(rollout_path))
             previous_offset = record.get("rollout_offset")
@@ -554,15 +604,45 @@ def track_target_usage(
                     record["rollout_offset"] = path.stat().st_size
                 except OSError:
                     record["rollout_offset"] = 0
+                previous_offset = record["rollout_offset"]
             else:
+                new_details = []
+                context = record.get("rollout_context")
+                context = dict(context) if isinstance(context, dict) else {}
                 new_buckets, next_offset, last_total = _read_rollout_usage_buckets(
                     rollout_path, cutoff, int(previous_offset), record.get("rollout_total_tokens"),
+                    new_details, context,
                 )
                 record["rollout_offset"] = next_offset
                 record["rollout_total_tokens"] = last_total
+                record["rollout_context"] = context
+                for detail in new_details:
+                    _merge_usage_detail(detail_candidates, detail)
                 for bucket in new_buckets:
                     key = str(int(bucket["at"]))
                     candidates[key] = candidates.get(key, 0) + int(bucket["tokens"])
+            if record.get("usage_details_version") != 1 and path.is_file() and backfill_budget > 0:
+                # Existing collectors know the account's historical continuity
+                # intervals. Re-read numeric usage plus turn execution metadata
+                # only; legacy total-token buckets must not be added again.
+                backfill_end = record.setdefault("detail_backfill_end", int(previous_offset))
+                backfill_offset = int(record.get("detail_backfill_offset") or 0)
+                backfill_context = record.get("detail_backfill_context") or {}
+                recovered = []
+                _, recovered_offset, recovered_total = _read_rollout_usage_buckets(
+                    rollout_path, cutoff, backfill_offset, record.get("detail_backfill_total"),
+                    recovered, backfill_context, int(backfill_end), min(backfill_budget, 8 * 1024 * 1024),
+                )
+                backfill_budget -= max(0, recovered_offset - backfill_offset)
+                record["detail_backfill_offset"] = recovered_offset
+                record["detail_backfill_total"] = recovered_total
+                record["detail_backfill_context"] = backfill_context
+                for detail in recovered:
+                    _merge_usage_detail(detail_candidates, detail)
+                if recovered_offset >= int(backfill_end):
+                    record["usage_details_version"] = 1
+                    if not (record.get("rollout_context") or {}).get("model"):
+                        record["rollout_context"] = dict(backfill_context)
         remaining_candidates: dict[str, int] = {}
         for key, tokens in candidates.items():
             occurred_at = int(key)
@@ -583,6 +663,19 @@ def track_target_usage(
                 remaining_candidates[key] = tokens
         record["usage_buckets"] = pending
         record["usage_candidates"] = remaining_candidates
+        remaining_details = {}
+        for key, detail in detail_candidates.items():
+            occurred_at = detail["at"]
+            interval = next((item for item in reversed(intervals)
+                             if int(item.get("start") or 0) <= occurred_at
+                             and occurred_at + 60 <= int(item.get("end") or 0)), None)
+            if interval is not None:
+                if accumulate and interval.get("account_key") == target_account_key:
+                    _merge_usage_detail(detail_pending, detail)
+            elif occurred_at + 60 > scan_at:
+                remaining_details[key] = detail
+        record["usage_details"] = detail_pending
+        record["detail_candidates"] = remaining_details
         records[session_key] = record
 
     state["version"] = 2
@@ -602,6 +695,7 @@ def track_target_usage(
 
     tracked = []
     bucket_budget = 10_000
+    detail_budget = 10_000
     for session in sessions:
         target_tokens = int(records[str(session["key"])]["target_tokens"])
         if target_tokens <= 0:
@@ -611,6 +705,7 @@ def track_target_usage(
             if key not in ("_rollout_path", "_usage_buckets")
         }
         attributed["tokens"] = target_tokens
+        attributed["usage_detail_backfill_complete"] = records[str(session["key"])].get("usage_details_version") == 1
         verified_buckets = [
             {"at": int(at), "tokens": int(tokens)}
             for at, tokens in sorted(
@@ -622,6 +717,11 @@ def track_target_usage(
             selected_buckets = verified_buckets[-bucket_budget:]
             attributed["usage_buckets"] = selected_buckets
             bucket_budget -= len(selected_buckets)
+        if detail_budget > 0:
+            details = sorted(records[str(session["key"])].get("usage_details", {}).values(), key=lambda item: item["at"])
+            if details:
+                attributed["usage_details"] = details[-detail_budget:]
+                detail_budget -= len(attributed["usage_details"])
         tracked.append(attributed)
     return tracked
 

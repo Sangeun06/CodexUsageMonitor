@@ -1,0 +1,7 @@
+0.7.1 restores recent request metadata from existing local rollout logs: the model and reasoning effort for each usage group, cached input, output, and reasoning tokens. Existing collector state and verified account intervals are preserved, and overlapping token totals are not counted twice.
+
+Personal quota percentages previously extrapolated from raw token proportions have been removed. Account quota percentages remain the service-reported values. A user's observed intervals are explicitly distinguished from their complete personal quota usage.
+
+Public release installers contain no collector credential. Upgrade using the same installation scope and keep the existing logs and collector state. The Windows machine installer preserves the existing token when its token field is left empty; a new installation needs the token from the monitoring server administrator.
+
+This release does not reconstruct an exact private per-request subscription quota denominator that the service does not expose.

@@ -67,6 +67,16 @@ class PackagingTest(unittest.TestCase):
         self.assertIn('gh api "repos/$GITHUB_REPOSITORY" --jq .visibility', workflow)
         self.assertNotIn("github.event.repository.private", workflow)
 
+    def test_public_release_excludes_embedded_credentials_and_preserves_upgrade_token(self):
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+        public_build = workflow.split("name: Build public packages without credentials", 1)[1].split("name: Build provisioned packages", 1)[0]
+        self.assertNotIn("secrets.COLLECTOR_TOKEN", public_build)
+        self.assertEqual(public_build.count("--without-token"), 3)
+        self.assertIn("assets=(dist/*generic*)", workflow)
+        script = (ROOT / "packaging" / "windows" / "installer.nsi").read_text()
+        self.assertIn("!ifdef WITHOUT_TOKEN", script)
+        self.assertIn("Leave empty to preserve the token", script)
+
 
 if __name__ == "__main__":
     unittest.main()

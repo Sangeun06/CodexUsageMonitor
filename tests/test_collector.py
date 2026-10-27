@@ -191,7 +191,66 @@ class CollectorTest(unittest.TestCase):
             self.assertTrue(apply_collector_update(update, root))
             self.assertEqual(target.read_bytes(), content)
             self.assertEqual((root / "collector.py.previous").read_text(), "OLD = True\n")
-            self.assertEqual(COLLECTOR_VERSION, "0.7.0")
+            self.assertEqual(COLLECTOR_VERSION, "0.7.1")
+
+    def test_request_metadata_preserves_model_switches_and_cache_without_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            def context(model, effort):
+                return {"type": "turn_context", "payload": {"model": model, "effort": effort,
+                    "cwd": "/secret/path", "user_instructions": "do-not-copy"}}
+            def usage(total, tokens, cached):
+                return {"type": "event_msg", "timestamp": "1970-01-01T00:17:10Z", "payload": {
+                    "type": "token_count", "info": {"last_token_usage": {
+                        "total_tokens": tokens, "input_tokens": tokens - 10, "cached_input_tokens": cached,
+                        "output_tokens": 10, "reasoning_output_tokens": 5,
+                    }, "total_token_usage": {"total_tokens": total}}}}
+            records = [context("small-model", "low"), usage(1000, 1000, 980), usage(1000, 1000, 980),
+                       context("large-model", "high"), usage(1100, 100, 0)]
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+            details, state = [], {}
+            _, offset, total = _read_rollout_usage_buckets(path, 0, 0, details=details, context=state, max_bytes=1)
+            self.assertEqual(state["model"], "small-model")
+            _read_rollout_usage_buckets(path, 0, offset, total, details, state)
+            self.assertEqual([row["model"] for row in details], ["small-model", "large-model"])
+            self.assertEqual([row["effort"] for row in details], ["low", "high"])
+            self.assertEqual(details[0]["cached_input_tokens"], 980)
+            self.assertNotIn("do-not-copy", str((details, state)))
+            self.assertNotIn("/secret/path", str((details, state)))
+
+    def test_upgrade_recovers_existing_logs_once_without_adding_legacy_tokens_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path, auth, state = root / "rollout.jsonl", root / "auth.json", root / "state.json"
+            auth.write_text("{}")
+            os.utime(auth, (800, 800))
+            path.write_text(json.dumps({"type": "turn_context", "payload": {"model": "small-model", "effort": "low"}}) + "\n" +
+                json.dumps({"type": "event_msg", "timestamp": "1970-01-01T00:17:10Z", "payload": {
+                    "type": "token_count", "info": {"last_token_usage": {"total_tokens": 100,
+                    "input_tokens": 90, "cached_input_tokens": 80, "output_tokens": 10, "reasoning_output_tokens": 2},
+                    "total_token_usage": {"total_tokens": 100}}}}) + "\n")
+            record = {"last_tokens": 100, "target_tokens": 100, "rollout_offset": path.stat().st_size,
+                      "rollout_total_tokens": 100, "usage_buckets": {"1020": 100}}
+            state.write_text(json.dumps({"version": 2, "profiles": {"node": {"sessions": {"s": record},
+                "last_account_key": "target", "last_scan_at": 1120,
+                "account_intervals": [{"start": 1000, "end": 1120, "account_key": "target"}]}}}))
+            session = {"key": "s", "tokens": 100, "created_at": 900, "updated_at": 1100, "_rollout_path": str(path)}
+            with patch("collector.time.time", return_value=1150):
+                first = track_target_usage([session], "target", "target", auth, state, "node")[0]
+            with patch("collector.time.time", return_value=1180):
+                second = track_target_usage([session], "target", "target", auth, state, "node")[0]
+            self.assertEqual(first["usage_details"], second["usage_details"])
+            self.assertEqual(first["usage_details"][0]["model"], "small-model")
+            self.assertEqual(first["usage_details"][0]["cached_input_tokens"], 80)
+            self.assertEqual(first["usage_details"][0]["tokens"], 100)
+            self.assertEqual(first["usage_buckets"], [{"at": 1020, "tokens": 100}])
+            self.assertTrue(first["usage_detail_backfill_complete"])
+            # A fresh install has no evidence that historical activity belongs
+            # to the current account, even though the local log exists.
+            state.unlink()
+            with patch("collector.time.time", return_value=1150):
+                fresh = track_target_usage([session], "target", "target", auth, state, "node")[0]
+            self.assertNotIn("usage_details", fresh)
 
     def test_app_server_snapshot_keeps_only_aggregate_usage(self):
         result = normalize_app_server_snapshot(

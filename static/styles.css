@@ -296,3 +296,8 @@ footer { color: var(--muted); font-size: 11px; }
 .registered-account input, .register-account-form input { color: var(--text); background: #101921; border: 1px solid #30404f; border-radius: 8px; padding: 9px 11px; max-width: 100%; }
 .account-key { font-family: monospace; font-size: 12px; padding: 10px 0; }
 @media (max-width: 600px) { .account-selector > span { flex-basis: 100%; } .registered-account { padding-bottom: 15px; border-bottom: 1px solid #30404f; } }
+
+.usage-evidence { grid-column: 1 / -1; min-width: 0; color: var(--muted); font-size: 11px; }
+.usage-evidence summary { cursor: pointer; padding: 9px 0; }
+.usage-evidence table { font-size: 11px; }
+.usage-evidence td small { display: block; }

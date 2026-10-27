@@ -415,7 +415,8 @@ class UsageStoreTest(unittest.TestCase):
         self.assertEqual(worker["tokens"], 300)
         self.assertEqual(worker["attributed_total_tokens"], 300)
         self.assertFalse(worker["partial"])
-        self.assertEqual(worker["status"], "high")
+        self.assertEqual(worker["status"], "throughput")
+        self.assertEqual(worker["basis"], "token_throughput")
 
     def test_weekly_breakdown_counts_users_and_untracked_tokens_from_same_period(self):
         def report(node_key, tokens, lifetime):
@@ -697,6 +698,11 @@ class UsageStoreTest(unittest.TestCase):
             },
         }
         with patch.object(self.store, "read_sessions", return_value=[]):
+            baseline = self.report(tokens=0, lifetime=4000)
+            baseline["sessions"] = []
+            baseline["account_usage"]["rate_limits"][0]["primary"]["used_percent"] = 20
+            self.store.ingest(baseline, now=999900)
+            report["sessions"][0]["usage_buckets"] = [{"at": 999900, "tokens": 250}]
             self.store.ingest(report, now=1_000_000)
             self.store.collect(now=1_000_000)
             dashboard = self.store.dashboard(now=1_000_000)
@@ -713,7 +719,68 @@ class UsageStoreTest(unittest.TestCase):
         self.assertEqual(worker["verified_event_tokens"], 250)
         self.assertEqual(response["update"]["version"], "0.7.0")
         self.assertEqual(response["alerts"][0]["kind"], "weekly-pace-150")
+        self.assertEqual(response["alerts"][0]["node_used_percent"], 10)
         self.assertNotIn("alerts", repeated)
+
+    def test_quota_comparison_and_alert_prefer_measured_consumption_over_token_volume(self):
+        baseline = self.report(tokens=0, lifetime=4000)
+        baseline["sessions"] = []
+        cheap = self.report(node_key="cheap", tokens=1_000_000, lifetime=1_004_000)
+        cheap["sessions"][0]["usage_buckets"] = [{"at": 999780, "tokens": 1_000_000}]
+        cheap["account_usage"]["rate_limits"][0]["primary"]["used_percent"] = 21
+        expensive = self.report(node_key="expensive", tokens=10, lifetime=1_004_010)
+        expensive["sessions"][0]["usage_buckets"] = [{"at": 999900, "tokens": 10}]
+        expensive["account_usage"]["rate_limits"][0]["primary"]["used_percent"] = 30
+        with patch.object(self.store, "read_sessions", return_value=[]):
+            self.store.ingest(baseline, now=999720)
+            self.store.ingest(cheap, now=999840)
+            self.store.ingest(expensive, now=999960)
+            with closing(sqlite3.connect(self.monitor)) as db, db:
+                # Previously queued token-based warnings must not leak through
+                # after the quota policy changes, even for the same target.
+                db.execute("INSERT INTO collector_alerts VALUES (?, ?, ?, ?, NULL)",
+                           ("f" * 24, "expensive", json.dumps({"account_key": "aaaaaaaaaaaa"}), 999960))
+            dashboard = self.store.dashboard(now=1000000)
+            self.assertNotIn("alerts", self.store.collector_response("cheap", {}, now=1000000))
+            alerts = self.store.collector_response("expensive", {}, now=1000000)["alerts"]
+            self.assertEqual(len(alerts), 1)
+            alert = alerts[0]
+        quota = dashboard["weekly_quota"]
+        self.assertEqual(quota["used_percent"], 30)
+        self.assertEqual(quota["remaining_percent"], 70)
+        self.assertEqual(quota["attributed_percent"], 10)
+        self.assertEqual(quota["user_usage"][0]["node_key"], "expensive")
+        self.assertEqual(quota["user_usage"][0]["used_percent"], 9)
+        self.assertEqual(alert["node_used_percent"], 9)
+
+    def test_initial_quota_without_observed_growth_does_not_target_a_token_heavy_user(self):
+        report = self.report(tokens=1_000_000)
+        report["account_usage"]["rate_limits"][0]["primary"]["used_percent"] = 80
+        self.store.ingest(report, now=1000000)
+        result = self.store.collector_response("node-a", {}, now=1000000)
+        self.assertNotIn("alerts", result)
+
+    def test_request_details_are_idempotent_and_do_not_invent_personal_quota(self):
+        report = self.report(tokens=1210)
+        report["collector"] = {"version": "0.7.1"}
+        report["sessions"][0]["usage_detail_backfill_complete"] = True
+        report["sessions"][0]["usage_details"] = [
+            {"at": 999960, "model": "small-model", "effort": "low", "service_tier": "standard",
+             "reasoning_mode": "standard", "tokens": 1010, "events": 1,
+             "input_tokens": 1000, "cached_input_tokens": 990, "output_tokens": 10, "reasoning_output_tokens": 0},
+            {"at": 999960, "model": "large-model", "effort": "high", "service_tier": "standard",
+             "reasoning_mode": "standard", "tokens": 200, "events": 1,
+             "input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 100, "reasoning_output_tokens": 80},
+        ]
+        self.store.ingest(report, now=1000030)
+        self.store.ingest(report, now=1000030)
+        user = next(row for row in self.store.dashboard(now=1000030)["weekly_quota"]["user_usage"] if row["node_key"] == "node-a")
+        self.assertIsNone(user["used_percent"])
+        self.assertNotIn("estimated_used_percent", user)
+        self.assertEqual(sum(row["tokens"] for row in user["usage_details"]), 1210)
+        self.assertEqual(user["usage_details"][0]["model"], "small-model")
+        self.assertEqual(user["usage_details"][0]["cached_input_tokens"], 990)
+        self.assertEqual(user["collector_metadata"]["version"], "0.7.1")
 
     def test_weekly_usage_history_starts_over_without_resetting_total_processed(self):
         def report(used_percent, resets_at, lifetime=5000):

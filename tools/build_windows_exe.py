@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server", default="http://143.248.136.95:8765")
     parser.add_argument("--token-file", type=Path, default=ROOT / "data" / "collector.token")
     parser.add_argument("--account-key", help="Registered 12-character anonymized account key")
+    parser.add_argument("--without-token", action="store_true", help="Build a public installer that preserves or asks for a token")
     parser.add_argument("--python-runtime", type=Path, required=True)
     parser.add_argument("--makensis", type=Path, required=True)
     parser.add_argument("--nsis-dir", type=Path, required=True)
@@ -41,7 +42,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if not args.token_file.is_file():
+    if not args.without_token and not args.token_file.is_file():
         raise SystemExit(f"collector token not found: {args.token_file}")
     parsed_server = urlparse(args.server)
     if parsed_server.scheme not in {"http", "https"} or not parsed_server.hostname:
@@ -52,7 +53,8 @@ def main() -> None:
         raise SystemExit("Python runtime SHA-256 does not match the pinned official release")
     version = (ROOT / "VERSION").read_text().strip()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    output = (args.output_dir / f"codex-usage-collector-{version}-windows-machine-setup.exe").resolve()
+    flavor = "-generic" if args.without_token else ""
+    output = (args.output_dir / f"codex-usage-collector-{version}-windows-machine{flavor}-setup.exe").resolve()
 
     with tempfile.TemporaryDirectory(prefix="codex-windows-exe-") as temp:
         runtime = Path(temp) / "runtime"
@@ -78,6 +80,8 @@ def main() -> None:
             f"-DOUTPUT_EXE={output}",
             str(ROOT / "packaging" / "windows" / "installer.nsi"),
         ]
+        if args.without_token:
+            command.insert(-1, "-DWITHOUT_TOKEN")
         subprocess.run(command, check=True, env=environment)
     output.chmod(0o600)
     print(output)

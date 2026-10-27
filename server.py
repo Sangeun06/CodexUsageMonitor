@@ -28,6 +28,7 @@ from typing import Any, Iterator
 from urllib.parse import parse_qs, urlparse
 
 from account_registry import initialize_accounts
+from quota_usage import read_quota_usage
 
 from collector import COLLECTOR_VERSION, read_app_server_usage
 from usage_analytics import EVENT_RETENTION_DAYS, read_analytics
@@ -222,6 +223,21 @@ class UsageStore:
                     ON collector_session_usage(node_key, bucket_at);
                 CREATE INDEX IF NOT EXISTS idx_collector_session_usage_bucket_at
                     ON collector_session_usage(bucket_at);
+                CREATE TABLE IF NOT EXISTS collector_usage_details (
+                    account_key TEXT NOT NULL, node_key TEXT NOT NULL, session_key TEXT NOT NULL,
+                    bucket_at INTEGER NOT NULL, model TEXT NOT NULL, effort TEXT NOT NULL,
+                    service_tier TEXT NOT NULL, reasoning_mode TEXT NOT NULL,
+                    tokens INTEGER NOT NULL, events INTEGER NOT NULL,
+                    input_tokens INTEGER, cached_input_tokens INTEGER, output_tokens INTEGER,
+                    reasoning_output_tokens INTEGER,
+                    PRIMARY KEY (account_key, node_key, session_key, bucket_at, model, effort, service_tier, reasoning_mode)
+                );
+                CREATE INDEX IF NOT EXISTS idx_usage_details_account_time ON collector_usage_details(account_key, bucket_at);
+                CREATE TABLE IF NOT EXISTS collector_usage_metadata (
+                    account_key TEXT NOT NULL, node_key TEXT NOT NULL, version TEXT NOT NULL,
+                    backfill_pending INTEGER NOT NULL, received_at INTEGER NOT NULL,
+                    PRIMARY KEY(account_key, node_key)
+                );
                 """
             )
             db.execute("BEGIN IMMEDIATE")
@@ -300,19 +316,19 @@ class UsageStore:
         aliases = self.read_aliases()
         for node in nodes:
             node["display_name"] = aliases.get(node["key"], node["os_user"])
-        reconciliation = self.read_usage_reconciliation(all_sessions, nodes, account_usage, weekly, now)
-        comparison = (reconciliation or {}).get("node_comparison") or []
+        attribution = self.read_period_attribution(all_sessions, nodes, UsageWindow.weekly(weekly, now))
+        with self._lock, self._connect_monitor() as db:
+            quota = read_quota_usage(db, self.collector_account_key(), weekly, aggregate_users(attribution), now)
+        comparison = [item for item in quota["user_usage"] if (item["used_percent"] or 0) > 0]
         if not comparison:
             return []
-        target = max(comparison, key=lambda item: int(item.get("tokens") or 0))
-        if int(target.get("tokens") or 0) <= 0:
-            return []
+        target = max(comparison, key=lambda item: item["used_percent"])
         resets_at = str(weekly.get("resets_at") or "unknown")
         band = max(0, min(100, int(used // 10) * 10))
         alert_key = hashlib.sha256(
-            f"weekly-pace-150:{self.collector_account_key()}:{resets_at}:{band}:{target['node_key']}".encode()
+            f"weekly-quota-pace-150:{self.collector_account_key()}:{resets_at}:{band}:{target['node_key']}".encode()
         ).hexdigest()[:24]
-        share = float(target.get("share_percent") or 0)
+        share = target["used_percent"]
         payload = {
             "id": alert_key,
             "kind": "weekly-pace-150",
@@ -321,9 +337,11 @@ class UsageStore:
             "title": "Codex 주간 사용 속도 경고",
             "message": (
                 f"공유 계정 사용률 {used:.1f}%가 현재 권장선 {recommended:.1f}%의 "
-                f"150%를 넘었습니다. 이 장비의 확인된 주간 사용 비중은 {share:.1f}%입니다."
+                f"150%를 넘었습니다. 이 장비의 관측 기반 추정 소모량은 주간 제공 한도의 {share:.1f}%입니다."
             ),
             "used_percent": used,
+            "node_used_percent": share,
+            "attribution_basis": "rate_limit_delta",
             "recommended_percent": recommended,
             "resets_at": resets_at,
         }
@@ -340,8 +358,10 @@ class UsageStore:
                 """SELECT alert_key, payload_json FROM collector_alerts
                    WHERE node_key = ? AND delivered_at IS NULL
                    AND COALESCE(json_extract(payload_json, '$.account_key'), ?) = ?
+                   AND json_extract(payload_json, '$.attribution_basis') = 'rate_limit_delta'
+                   AND json_extract(payload_json, '$.resets_at') = ?
                    ORDER BY created_at LIMIT 8""",
-                (node_key, self.collector_account_key(), self.collector_account_key()),
+                (node_key, self.collector_account_key(), self.collector_account_key(), resets_at),
             ).fetchall()
         return [item for row in rows if (item := json.loads(row["payload_json"])).get("account_key", self.collector_account_key()) == self.collector_account_key()]
 
@@ -517,6 +537,7 @@ class UsageStore:
         ]
         clean_sessions = []
         clean_usage_buckets = []
+        clean_details = []
         total_buckets = 0
         for session in sessions:
             if not isinstance(session, dict) or not session.get("key"):
@@ -544,6 +565,26 @@ class UsageStore:
                 total_buckets += 1
                 if total_buckets > 50_000:
                     raise ValueError("too many session usage buckets")
+            raw_details = session.get("usage_details", [])
+            if not isinstance(raw_details, list):
+                raise ValueError("invalid usage details")
+            for detail in raw_details:
+                if not isinstance(detail, dict):
+                    raise ValueError("invalid usage detail")
+                at, tokens, events = (self._nonnegative_int(detail.get(field)) for field in ("at", "tokens", "events"))
+                if at is None or at % 60 or tokens is None or events is None or events < 1:
+                    raise ValueError("invalid usage detail counters")
+                metadata = [detail.get(field, "unknown") for field in ("model", "effort", "service_tier", "reasoning_mode")]
+                if not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", value) for value in metadata):
+                    raise ValueError("invalid usage detail metadata")
+                counts = [self._nonnegative_int(detail.get(field)) for field in (
+                    "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens",
+                )]
+                if counts[0] is not None and counts[1] is not None and counts[1] > counts[0]:
+                    raise ValueError("cached tokens exceed input tokens")
+                clean_details.append((account_key, node["key"][:64], session_key, at, *metadata, tokens, events, *counts))
+                if len(clean_details) > 50_000:
+                    raise ValueError("too many usage details")
         with self._lock, self._connect_monitor() as db:
             db.execute("PRAGMA foreign_keys=ON")
             db.execute(
@@ -571,6 +612,35 @@ class UsageStore:
                    tokens_used=MAX(tokens_used, excluded.tokens_used)""",
                 [(*bucket, account_key) for bucket in clean_usage_buckets],
             )
+            db.executemany(
+                """INSERT INTO collector_usage_details VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(account_key,node_key,session_key,bucket_at,model,effort,service_tier,reasoning_mode)
+                   DO UPDATE SET tokens=excluded.tokens, events=excluded.events,
+                   input_tokens=COALESCE(excluded.input_tokens,input_tokens),
+                   cached_input_tokens=COALESCE(excluded.cached_input_tokens,cached_input_tokens),
+                   output_tokens=COALESCE(excluded.output_tokens,output_tokens),
+                   reasoning_output_tokens=COALESCE(excluded.reasoning_output_tokens,reasoning_output_tokens)
+                   WHERE excluded.tokens>=collector_usage_details.tokens AND excluded.events>=collector_usage_details.events""",
+                clean_details,
+            )
+            if clean_details:
+                # Details and legacy minute counters describe overlapping work.
+                # Recover missing history with MAX, never by adding both.
+                db.execute(
+                    """INSERT INTO collector_session_usage (node_key,session_key,bucket_at,tokens_used,account_key)
+                       SELECT node_key,session_key,bucket_at,SUM(tokens),account_key FROM collector_usage_details
+                       WHERE account_key=? AND node_key=? AND bucket_at>=?
+                       GROUP BY account_key,node_key,session_key,bucket_at
+                       ON CONFLICT(account_key,node_key,session_key,bucket_at) DO UPDATE SET
+                       tokens_used=MAX(tokens_used,excluded.tokens_used)""",
+                    (account_key, node["key"], now - 14 * 86400),
+                )
+            collector_info = payload.get("collector") or {}
+            if isinstance(collector_info, dict):
+                pending = sum(session.get("usage_detail_backfill_complete") is False for session in sessions)
+                db.execute("INSERT OR REPLACE INTO collector_usage_metadata VALUES (?,?,?,?,?)",
+                           (account_key, node["key"], str(collector_info.get("version") or "unknown")[:40], pending, now))
+            db.execute("DELETE FROM collector_usage_details WHERE bucket_at < ?", (now - EVENT_RETENTION_DAYS * 86400,))
             db.execute(
                 "DELETE FROM collector_session_usage WHERE bucket_at < ?",
                 (now - EVENT_RETENTION_DAYS * 86400,),
@@ -862,7 +932,6 @@ class UsageStore:
             weekly_attribution = self.read_period_attribution(all_sessions, nodes, window)
         weekly_users = {item["node_key"]: item["tokens"] for item in aggregate_users(weekly_attribution)}
         compared_weekly_tokens = sum(weekly_users.values())
-        average = compared_weekly_tokens / len(nodes) if nodes else 0
         comparison = []
         for node in nodes:
             key = node["key"]
@@ -871,10 +940,6 @@ class UsageStore:
             tokens = weekly_users.get(key, 0)
             maximum = sum(item.maximum_tokens for item in amounts)
             partial = [item for item in amounts if item.maximum_tokens > item.tokens]
-            ratio = tokens / average if average > 0 else 0.0
-            status = "high" if len(nodes) > 1 and ratio >= 1.5 else (
-                "low" if len(nodes) > 1 and ratio <= 0.5 else "normal"
-            )
             comparison.append({
                 "node_key": key, "hostname": node["hostname"], "os_user": node["os_user"],
                 "display_name": node.get("display_name") or node["os_user"],
@@ -885,7 +950,7 @@ class UsageStore:
                 "verified_event_tokens": sum(item.event_tokens for item in amounts),
                 "snapshot_only_tokens": sum(item.snapshot_only_tokens for item in amounts),
                 "share_percent": tokens / compared_weekly_tokens * 100 if compared_weekly_tokens else 0.0,
-                "average_ratio": ratio, "status": status, "session_count": len(node_sessions),
+                "basis": "token_throughput", "status": "throughput", "session_count": len(node_sessions),
                 "seen_at": utc_iso(node["seen_at"]),
             })
         comparison.sort(key=lambda item: (-item["tokens"], item["node_key"]))
@@ -1167,6 +1232,8 @@ class UsageStore:
         )
         with self._lock, self._connect_monitor() as db:
             analytics = read_analytics(db, account_usage, weekly_usage, all_sessions, nodes, now, weekly_token_breakdown, account_key=self.collector_account_key())
+            weekly_quota = read_quota_usage(db, self.collector_account_key(), weekly_usage,
+                                           aggregate_users(weekly_attribution), now)
         for session in sessions:
             session["created_at"] = utc_iso(session["created_at"])
             session["updated_at"] = utc_iso(session["updated_at"])
@@ -1205,6 +1272,7 @@ class UsageStore:
             "nodes": nodes,
             "account_usage": account_usage,
             "weekly_usage": weekly_usage,
+            "weekly_quota": weekly_quota,
             "weekly_token_breakdown": weekly_token_breakdown,
             "weekly_user_tokens": aggregate_users(weekly_attribution) if weekly_usage else None,
             "daily_user_trend": daily_user_trend,

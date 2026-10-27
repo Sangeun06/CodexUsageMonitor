@@ -1,4 +1,4 @@
-name: Private release
+name: Collector release
 
 on:
   push:
@@ -13,15 +13,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Verify current repository visibility
+        id: repository
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           visibility="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
-          if [ "$visibility" != "private" ]; then
-            echo "::error::Provisioned artifacts contain a collector credential. Current repository visibility is '$visibility', not 'private'."
-            exit 1
-          fi
-          echo "Repository visibility verified: private"
+          case "$visibility" in
+            public|private) printf 'visibility=%s\n' "$visibility" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Unsupported repository visibility"; exit 1 ;;
+          esac
 
       - uses: actions/checkout@v4
 
@@ -29,15 +29,8 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Validate release configuration
-        env:
-          COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
-          TARGET_ACCOUNT_KEY: ${{ secrets.TARGET_ACCOUNT_KEY }}
-          MONITOR_SERVER_URL: ${{ vars.MONITOR_SERVER_URL }}
+      - name: Validate release version
         run: |
-          test -n "$COLLECTOR_TOKEN" || { echo "::error::COLLECTOR_TOKEN secret is required"; exit 1; }
-          test -n "$TARGET_ACCOUNT_KEY" || { echo "::error::TARGET_ACCOUNT_KEY secret is required"; exit 1; }
-          test -n "$MONITOR_SERVER_URL" || { echo "::error::MONITOR_SERVER_URL variable is required"; exit 1; }
           test "${GITHUB_REF_NAME#v}" = "$(tr -d '\r\n' < VERSION)" || {
             echo "::error::Tag version must match VERSION"; exit 1;
           }
@@ -53,36 +46,62 @@ jobs:
             https://www.python.org/ftp/python/3.13.13/python-3.13.13-embed-amd64.zip \
             --output /tmp/python-3.13.13-embed-amd64.zip
 
-      - name: Build provisioned and generic packages
+      - name: Build public packages without credentials
+        if: steps.repository.outputs.visibility == 'public'
+        env:
+          MONITOR_SERVER_URL: ${{ vars.MONITOR_SERVER_URL }}
+        run: |
+          server_url="${MONITOR_SERVER_URL:-http://143.248.136.95:8765}"
+          python3 tools/build_collector_bundle.py --without-token \
+            --server "$server_url" --account-key 000000000000
+          python3 tools/build_windows_bundle.py --without-token \
+            --server "$server_url" --account-key 000000000000
+          python3 tools/build_windows_exe.py --without-token \
+            --server "$server_url" --account-key 000000000000 \
+            --python-runtime /tmp/python-3.13.13-embed-amd64.zip \
+            --makensis /usr/bin/makensis --nsis-dir /usr/share/nsis
+
+      - name: Build provisioned packages for private repositories
+        if: steps.repository.outputs.visibility == 'private'
         env:
           COLLECTOR_TOKEN: ${{ secrets.COLLECTOR_TOKEN }}
           TARGET_ACCOUNT_KEY: ${{ secrets.TARGET_ACCOUNT_KEY }}
           MONITOR_SERVER_URL: ${{ vars.MONITOR_SERVER_URL }}
         run: |
+          test -n "$COLLECTOR_TOKEN" || { echo "::error::COLLECTOR_TOKEN is required"; exit 1; }
+          test -n "$TARGET_ACCOUNT_KEY" || { echo "::error::TARGET_ACCOUNT_KEY is required"; exit 1; }
+          test -n "$MONITOR_SERVER_URL" || { echo "::error::MONITOR_SERVER_URL is required"; exit 1; }
           install -m 600 /dev/null /tmp/collector.token
           printf '%s' "$COLLECTOR_TOKEN" > /tmp/collector.token
           python3 tools/build_collector_bundle.py \
-            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
-            --account-key "$TARGET_ACCOUNT_KEY"
-          python3 tools/build_collector_bundle.py \
-            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
-            --account-key "$TARGET_ACCOUNT_KEY" --without-token
+            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token --account-key "$TARGET_ACCOUNT_KEY"
           python3 tools/build_windows_bundle.py \
-            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
-            --account-key "$TARGET_ACCOUNT_KEY"
-          python3 tools/build_windows_bundle.py \
-            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
-            --account-key "$TARGET_ACCOUNT_KEY" --without-token
+            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token --account-key "$TARGET_ACCOUNT_KEY"
           python3 tools/build_windows_exe.py \
-            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token \
-            --account-key "$TARGET_ACCOUNT_KEY" \
+            --server "$MONITOR_SERVER_URL" --token-file /tmp/collector.token --account-key "$TARGET_ACCOUNT_KEY" \
             --python-runtime /tmp/python-3.13.13-embed-amd64.zip \
             --makensis /usr/bin/makensis --nsis-dir /usr/share/nsis
-          sha256sum dist/* > dist/SHA256SUMS
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILD_VISIBILITY: ${{ steps.repository.outputs.visibility }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag --generate-notes --title "Codex Usage Monitor $GITHUB_REF_NAME"
+          visibility="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+          if [ "$visibility" != "$BUILD_VISIBILITY" ]; then
+            echo "::error::Repository visibility changed during the build"; exit 1
+          fi
+          if [ "$visibility" = public ]; then
+            assets=(dist/*generic*)
+          else
+            assets=(dist/*)
+          fi
+          sha256sum "${assets[@]}" > dist/SHA256SUMS
+          notes="packaging/release-notes-${GITHUB_REF_NAME#v}.txt"
+          if [ -f "$notes" ]; then
+            note_args=(--notes-file "$notes")
+          else
+            note_args=(--generate-notes)
+          fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" dist/SHA256SUMS \
+            --verify-tag "${note_args[@]}" --title "Codex Usage Monitor $GITHUB_REF_NAME"

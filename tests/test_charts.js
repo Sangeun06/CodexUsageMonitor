@@ -23,16 +23,15 @@ function createUi() {
   return { context, elements };
 }
 
-function render(breakdown) {
+function render(quota) {
   const { context, elements } = createUi();
   const data = {
     nodes: [{key: "a", display_name: "Alice <team>", hostname: "worker"}],
-    weekly_token_breakdown: {
-      basis: "daily_lower_bound", is_lower_bound: true,
+    weekly_quota: quota === null ? null : {
+      basis: "rate_limit_delta", used_percent: 20, remaining_percent: 80,
+      attributed_percent: 2, unattributed_percent: 18,
       coverage_started_at: "2026-10-03T06:37:17Z", coverage_ended_at: "2026-10-05T08:00:00Z",
-      account_dates: ["2026-10-04"], account_tokens: 1000, attributed_session_tokens: 100,
-      user_tokens: [{node_key: "a", tokens: 100}], participant_count: 1,
-      untracked_tokens: 900, comparable: true, ...breakdown,
+      user_usage: [{node_key: "a", tokens: 100, used_percent: 2}], ...quota,
     },
   };
   context.renderWeeklyBreakdown(data);
@@ -58,24 +57,27 @@ test("new user's snapshot-only weekly usage is visible alongside lifetime counte
   assert.match(context.renderProjectDetails(projects), /주간 200/);
 });
 
-test("weekly view explains snapshot supplementation without duplicating it", () => {
-  const elements = render({ verified_event_tokens: 40, snapshot_only_tokens: 60 });
-  assert.equal(elements.get("weeklyTrackedTokens").textContent, "100");
-  assert.match(elements.get("weeklyBreakdownNote").textContent, /이벤트 40 · 세션 기준 보완 60/);
+test("weekly quota uses the full allowance and retains remaining capacity", () => {
+  const elements = render();
+  assert.equal(elements.get("weeklyUsedPercent").textContent, "20.00%");
+  assert.equal(elements.get("weeklyRemainingPercent").textContent, "80.00%");
+  assert.equal(elements.get("weeklyAttributedPercent").textContent, "2.00%");
+  assert.equal(elements.get("weeklyUnattributedPercent").textContent, "18.00%");
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:2\.0000%/);
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:18\.0000%/);
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:80\.0000%/);
+  assert.match(elements.get("comparisonList").innerHTML, /<strong>2\.00%<\/strong>/);
+  assert.match(elements.get("comparisonList").innerHTML, /100 토큰 · 처리량 참고/);
+  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /Alice &lt;team&gt;/);
+  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /남은 한도/);
+  assert.match(elements.get("weeklyBreakdownNote").textContent, /추론/);
 });
 
-test("weekly and comparison bars include the missing 90% instead of normalizing users to 100%", () => {
-  const elements = render();
-  assert.equal(elements.get("weeklyUntrackedTokens").textContent, "최소 900");
-  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:10\.0000%/);
-  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:90\.0000%/);
-  assert.match(elements.get("comparisonList").innerHTML, /10\.0%/);
-  assert.match(elements.get("comparisonList").innerHTML, /<strong>10\.0%<\/strong><small>100 토큰<\/small>/);
-  assert.match(elements.get("comparisonList").innerHTML, /<strong>90\.0%<\/strong><small>최소 900 토큰<\/small>/);
-  assert.match(elements.get("comparisonList").innerHTML, /미추적/);
-  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /Alice &lt;team&gt;/);
-  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /<strong>10\.0%<\/strong>/);
-  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /<strong>90\.0%<\/strong>/);
+test("a large token counter cannot override a small observed quota", () => {
+  const elements = render({ user_usage: [{node_key: "a", tokens: 1000000000, used_percent: 0.5}], attributed_percent: 0.5, unattributed_percent: 19.5 });
+  assert.match(elements.get("comparisonList").innerHTML, /<strong>0\.50%<\/strong>/);
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:0\.5000%/);
+  assert.doesNotMatch(elements.get("weeklyBreakdownStack").innerHTML, /NaN|Infinity/);
 });
 
 test("today never displays the last reported day or a future bucket", () => {
@@ -107,8 +109,8 @@ test("different limits with the same reset time stay visible", () => {
     },
   });
   assert.equal((elements.get("rateLimitGrid").innerHTML.match(/class="rate-card"/g) || []).length, 2);
-  assert.match(elements.get("rateLimitGrid").innerHTML, /20\.0%/);
-  assert.match(elements.get("rateLimitGrid").innerHTML, /70\.0%/);
+  assert.match(elements.get("rateLimitGrid").innerHTML, /20\.00%/);
+  assert.match(elements.get("rateLimitGrid").innerHTML, /70\.00%/);
 });
 
 test("charts clear the previous curve when samples fall below two", () => {
@@ -127,19 +129,42 @@ test("missing weekly usage clears previous pace estimates", () => {
     label: "빠름", status: "fast", deviation_percent: 20,
     daily_budget_percent: 14, remaining_daily_budget_percent: 5, projected_end_percent: 150,
   } });
-  assert.equal(elements.get("projectedUsage").textContent, "150.0%");
+  assert.equal(elements.get("projectedUsage").textContent, "150.00%");
   context.renderPace(null);
   assert.equal(elements.get("projectedUsage").textContent, "—");
   assert.equal(elements.get("paceStatus").className, "");
 });
 
-test("an insufficient account total shows unknown residual and no misleading full user bar", () => {
-  const elements = render({account_tokens: 0, untracked_tokens: null, comparable: false});
-  assert.equal(elements.get("weeklyUntrackedTokens").textContent, "확인 불가");
+test("old token-derived percentages are ignored when personal measurement is missing", () => {
+  const elements = render({user_usage: [{node_key: "a", tokens: 1000000, used_percent: null,
+    estimated_used_percent: 42, observed_used_percent: 0, estimate_method: "account_average"}],
+    attributed_percent: 0, unattributed_percent: 20, estimated_attributed_percent: 42});
+  assert.match(elements.get("comparisonList").innerHTML, /개인별 실측 없음/);
+  assert.doesNotMatch(elements.get("comparisonList").innerHTML, /42\.00%/);
+  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /개인별 실측 없음/);
+  assert.equal(elements.get("weeklyAttributedPercent").textContent, "0.00%");
+  assert.equal(elements.get("weeklyUnattributedPercent").textContent, "20.00%");
+  assert.doesNotMatch(elements.get("weeklyBreakdownStack").innerHTML, /NaN|Infinity|width:42/);
+});
+
+test("missing weekly limits clear previous quota and comparison", () => {
+  const elements = render(null);
+  assert.equal(elements.get("weeklyUsedPercent").textContent, "—");
   assert.equal(elements.get("weeklyBreakdownStack").innerHTML, "");
-  assert.match(elements.get("comparisonList").innerHTML, /비중 계산 불가/);
-  assert.match(elements.get("comparisonList").innerHTML, /<strong>계산 대기<\/strong><small>100 토큰<\/small>/);
-  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /<strong>계산 대기<\/strong>/);
-  assert.doesNotMatch(elements.get("weeklyBreakdownLegend").innerHTML, /NaN|Infinity|100\.0%/);
-  assert.doesNotMatch(elements.get("comparisonList").innerHTML, /width:100%/);
+  assert.equal(elements.get("comparisonList").innerHTML, "");
+});
+
+test("fractional quota stays visible in user values, totals and tooltips", () => {
+  const elements = render({used_percent: 3.1274, remaining_percent: 96.8726,
+    attributed_percent: 3.1274, unattributed_percent: 0,
+    user_usage: [{node_key: "a", tokens: 100, used_percent: 3.1274}]});
+  assert.equal(elements.get("weeklyUsedPercent").textContent, "3.1274%");
+  assert.match(elements.get("comparisonList").innerHTML, /3\.1274%/);
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /3\.1274%/);
+  const tiny = render({user_usage: [{node_key: "a", tokens: 100, used_percent: 0.0032}]});
+  assert.match(tiny.get("comparisonList").innerHTML, /0\.0032%/);
+  const {formatPercent} = require('../static/usage-view.js');
+  assert.equal(formatPercent(3), '3.00%');
+  assert.equal(formatPercent(0.00001), '<0.0001%');
+  assert.equal(formatPercent(null), '관측 대기');
 });

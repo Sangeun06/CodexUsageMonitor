@@ -13,8 +13,10 @@ Unicode true
 !ifndef RUNTIME_DIR
   !error "RUNTIME_DIR is required"
 !endif
-!ifndef TOKEN_FILE
-  !error "TOKEN_FILE is required"
+!ifndef WITHOUT_TOKEN
+  !ifndef TOKEN_FILE
+    !error "TOKEN_FILE is required"
+  !endif
 !endif
 !ifndef SERVER_URL
   !error "SERVER_URL is required"
@@ -42,6 +44,10 @@ Var ServerAddress
 Var ServerDialog
 Var ServerInput
 Var LegacyAccountKey
+!ifdef WITHOUT_TOKEN
+Var TokenInput
+Var CollectorToken
+!endif
 
 !define MUI_ABORTWARNING
 !define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
@@ -57,6 +63,7 @@ Page custom ServerPageCreate ServerPageLeave
 
 Function .onInit
   SetRegView 64
+  SetShellVarContext all
   StrCpy $ServerAddress "${SERVER_URL}"
   StrCpy $LegacyAccountKey "${TARGET_ACCOUNT_KEY}"
   ReadRegStr $0 HKLM "Software\CodexUsageCollector" "Server"
@@ -80,10 +87,16 @@ Function ServerPageCreate
   ${If} $ServerDialog == error
     Abort
   ${EndIf}
-  ${NSD_CreateLabel} 0 0 100% 32u "Central server URL (http:// or https://). The server must accept the collector token included with this installer."
+  ${NSD_CreateLabel} 0 0 100% 32u "Central server URL (http:// or https://)."
   Pop $0
   ${NSD_CreateText} 0 40u 100% 14u "$ServerAddress"
   Pop $ServerInput
+!ifdef WITHOUT_TOKEN
+  ${NSD_CreateLabel} 0 62u 100% 28u "Collector token. Leave empty to preserve the token from an existing installation."
+  Pop $0
+  ${NSD_CreatePassword} 0 94u 100% 14u ""
+  Pop $TokenInput
+!endif
   nsDialogs::Show
 FunctionEnd
 
@@ -96,6 +109,15 @@ Function ServerPageLeave
     MessageBox MB_ICONEXCLAMATION "Enter an HTTP(S) server URL."
     Abort
   ${EndIf}
+!ifdef WITHOUT_TOKEN
+  ${NSD_GetText} $TokenInput $CollectorToken
+  ${If} $CollectorToken == ""
+    IfFileExists "$APPDATA\CodexUsageCollector\collector.token" keep_existing_token
+    MessageBox MB_ICONEXCLAMATION "Enter the collector token supplied by your monitoring server administrator."
+    Abort
+    keep_existing_token:
+  ${EndIf}
+!endif
 FunctionEnd
 
 Section "Machine-wide collector" SecMain
@@ -120,7 +142,15 @@ Section "Machine-wide collector" SecMain
 
   CreateDirectory "$APPDATA\CodexUsageCollector"
   SetOutPath "$APPDATA\CodexUsageCollector"
+!ifdef WITHOUT_TOKEN
+  ${If} $CollectorToken != ""
+    FileOpen $0 "$APPDATA\CodexUsageCollector\collector.token" w
+    FileWrite $0 "$CollectorToken$\r$\n"
+    FileClose $0
+  ${EndIf}
+!else
   File /oname=collector.token "${TOKEN_FILE}"
+!endif
   nsExec::ExecToLog 'icacls.exe "$APPDATA\CodexUsageCollector\collector.token" /inheritance:r /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)"'
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
