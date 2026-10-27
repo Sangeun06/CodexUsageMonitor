@@ -1,7 +1,7 @@
 import sqlite3
 import unittest
 
-from quota_usage import build_quota_usage, read_quota_usage
+from quota_usage import account_quota_contract, build_quota_usage, read_quota_usage
 from usage_aggregation import utc_iso
 
 
@@ -76,6 +76,30 @@ class QuotaUsageTest(unittest.TestCase):
         self.assertEqual(result["unattributed_percent"], 0)
         self.assertEqual(result["days"]["1970-01-01"]["used_percent"], 0)
 
+    def test_actual_plan_does_not_invent_an_absolute_token_allowance(self):
+        contract = account_quota_contract({"rate_limits": [{"id": "codex", "plan": "prolite"}]}, self.weekly, [], 1200)
+        self.assertEqual(contract["plan_code"], "prolite")
+        self.assertEqual(contract["provided_capacity"], {"value": 100, "unit": "provider_percent"})
+        self.assertIsNone(contract["absolute_capacity"]["value"])
+        self.assertEqual(contract["absolute_capacity"]["status"], "not_reported_by_provider")
+        self.assertFalse(contract["per_request_quota_available"])
+
+    def test_recent_spend_preserves_fractional_provider_changes(self):
+        samples = [{"sampled_at": 1080, "used_percent": 2.0}, {"sampled_at": 1200, "used_percent": 2.0321}]
+        contract = account_quota_contract({}, self.weekly, samples, 1200)
+        recent = contract["recent_changes"][0]
+        self.assertAlmostEqual(recent["change_percent_points"], 0.0321)
+        self.assertEqual(recent["status"], "reported_increase")
+        self.assertEqual(contract["scope"], "account")
+
+    def test_unchanged_and_downward_provider_reports_do_not_claim_zero_or_negative_request_cost(self):
+        for last, status in ((2, "reported_unchanged"), (1, "provider_correction")):
+            contract = account_quota_contract({}, self.weekly,
+                [{"sampled_at": 1080, "used_percent": 2}, {"sampled_at": 1200, "used_percent": last}], 1200)
+            self.assertEqual(contract["recent_changes"][0]["status"], status)
+        missing = account_quota_contract({}, self.weekly, [{"sampled_at": 1200, "used_percent": 2}], 1200)
+        self.assertIsNone(missing["recent_changes"][0]["change_percent_points"])
+
     def test_unobserved_usage_is_never_forced_onto_token_heavy_low_model_user(self):
         result = self.build([(1080, 10)])
         for user in result["user_usage"]:
@@ -107,7 +131,7 @@ class QuotaUsageTest(unittest.TestCase):
             db.execute("CREATE TABLE account_limit_samples (account_key, limit_id, window_kind, resets_at, window_minutes, sampled_at, used_percent)")
             db.execute("CREATE TABLE collector_session_usage (account_key, node_key, session_key, bucket_at, tokens_used)")
             db.execute("CREATE TABLE collector_usage_details (account_key,node_key,model,effort,service_tier,reasoning_mode,bucket_at,tokens,events,input_tokens,cached_input_tokens,output_tokens,reasoning_output_tokens)")
-            db.execute("CREATE TABLE collector_usage_metadata (account_key,node_key,version,backfill_pending)")
+            db.execute("CREATE TABLE collector_usage_metadata (account_key,node_key,version,kind,backfill_pending)")
             reset = 900 + 604800
             db.executemany("INSERT INTO account_limit_samples VALUES (?,?,?,?,?,?,?)", [
                 ("a", "codex", "primary", reset, 10080, 960, 5),

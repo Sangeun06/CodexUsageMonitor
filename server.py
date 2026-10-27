@@ -241,6 +241,9 @@ class UsageStore:
                 """
             )
             db.execute("BEGIN IMMEDIATE")
+            metadata_columns = {row["name"] for row in db.execute("PRAGMA table_info(collector_usage_metadata)")}
+            if "kind" not in metadata_columns:
+                db.execute("ALTER TABLE collector_usage_metadata ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown'")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(session_samples)")}
             if "node_key" not in columns:
                 # Old snapshots used only the session hash. Preserve every row,
@@ -638,8 +641,9 @@ class UsageStore:
             collector_info = payload.get("collector") or {}
             if isinstance(collector_info, dict):
                 pending = sum(session.get("usage_detail_backfill_complete") is False for session in sessions)
-                db.execute("INSERT OR REPLACE INTO collector_usage_metadata VALUES (?,?,?,?,?)",
-                           (account_key, node["key"], str(collector_info.get("version") or "unknown")[:40], pending, now))
+                db.execute("INSERT OR REPLACE INTO collector_usage_metadata (account_key,node_key,version,backfill_pending,received_at,kind) VALUES (?,?,?,?,?,?)",
+                           (account_key, node["key"], str(collector_info.get("version") or "unknown")[:40], pending, now,
+                            str(collector_info.get("kind") or "unknown")[:40]))
             db.execute("DELETE FROM collector_usage_details WHERE bucket_at < ?", (now - EVENT_RETENTION_DAYS * 86400,))
             db.execute(
                 "DELETE FROM collector_session_usage WHERE bucket_at < ?",
@@ -1233,7 +1237,7 @@ class UsageStore:
         with self._lock, self._connect_monitor() as db:
             analytics = read_analytics(db, account_usage, weekly_usage, all_sessions, nodes, now, weekly_token_breakdown, account_key=self.collector_account_key())
             weekly_quota = read_quota_usage(db, self.collector_account_key(), weekly_usage,
-                                           aggregate_users(weekly_attribution), now)
+                                           aggregate_users(weekly_attribution), now, account_usage)
         for session in sessions:
             session["created_at"] = utc_iso(session["created_at"])
             session["updated_at"] = utc_iso(session["updated_at"])

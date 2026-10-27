@@ -32,6 +32,8 @@ function send(method,params={},sessionId) { return new Promise((resolve,reject)=
     assert.equal(await evaluate("document.getElementById('weeklyUsedPercent').textContent"), '20.00%');
     assert.equal(await evaluate("document.getElementById('weeklyRemainingPercent').textContent"), '80.00%');
     assert.equal(await evaluate("document.getElementById('weeklyAttributedPercent').textContent"), '15.00%');
+    assert.match(await evaluate("document.getElementById('quotaPlan').textContent"), /prolite/);
+    assert.match(await evaluate("document.getElementById('recentAccountChange').textContent"), /15\.00%p/);
     assert.match(await evaluate("document.getElementById('weeklyDayRows').textContent"), /15\.00%/);
     assert.match(await evaluate("document.getElementById('weeklyDonut').textContent"), /20\.00%/);
     await evaluate("document.querySelector('.usage-evidence').open=true");
@@ -45,6 +47,7 @@ function send(method,params={},sessionId) { return new Promise((resolve,reject)=
     assert.equal(await evaluate("document.getElementById('weeklyUsedPercent').textContent"), '3.125%');
     assert.equal(await evaluate("document.getElementById('weeklyRemainingPercent').textContent"), '96.875%');
     assert.equal(await evaluate("document.getElementById('weeklyAttributedPercent').textContent"), '0.00%');
+    assert.match(await evaluate("document.getElementById('quotaPlan').textContent"), /plus/);
     assert.match(await evaluate("document.getElementById('comparisonList').textContent"), /개인별 실측 없음/);
     assert.match(await evaluate("document.getElementById('comparisonList').textContent"), /수집기 0.7.1 업데이트 대기/);
     assert.doesNotMatch(await evaluate("document.getElementById('comparisonList').textContent"), /보정 추정|잠정 추정/);

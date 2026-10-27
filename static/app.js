@@ -163,6 +163,25 @@ const userQuota = user => user.used_percent;
 const allocatedQuota = quota => quota.attributed_percent;
 const unallocatedQuota = quota => quota.unattributed_percent;
 
+function renderQuotaContract(data) {
+  const contract = data.weekly_quota?.account_quota;
+  $("quotaPlan").textContent = contract?.plan_code ? `실제 계정 플랜: ${contract.plan_code}` : "플랜 보고 대기";
+  $("quotaCapacityNote").textContent = contract
+    ? "제공 한도는 서비스가 정의한 100%입니다. 현재 계정 응답은 100%에 해당하는 절대 토큰·크레딧량을 제공하지 않습니다."
+    : "계정의 실제 한도 보고를 기다리는 중입니다.";
+  const recent = contract?.recent_changes?.find(item => item.status !== "insufficient_samples");
+  if (!recent) {
+    $("recentAccountChange").textContent = "사용 전후 관측 대기";
+    $("recentAccountRange").textContent = "서로 다른 시각의 한도 보고가 두 번 이상 필요합니다.";
+    return;
+  }
+  $("recentAccountChange").textContent = recent.status === "provider_correction" ? "제공처 한도값 조정"
+    : recent.status === "reported_unchanged" ? "보고된 계정 사용률 변동 없음"
+    : `계정 사용률 +${quotaLabel(recent.change_percent_points)}p`;
+  const range = `${new Date(recent.started_at).toLocaleTimeString("ko-KR")} → ${new Date(recent.ended_at).toLocaleTimeString("ko-KR")}`;
+  $("recentAccountRange").textContent = `${range} · 공유 계정 전체의 보고값 변화입니다.${recent.status === "reported_unchanged" ? " 미세 사용이나 보고 지연을 실제 사용량 0으로 판정하지 않습니다." : " 요청별·개인별 차감률은 응답에 포함되지 않습니다."}`;
+}
+
 function renderWeeklyBreakdown(data) {
   const quota = data.weekly_quota;
   $("weeklyBreakdownEmpty").style.display = quota ? "none" : "block";
@@ -206,9 +225,10 @@ function renderWeeklyBreakdown(data) {
 function renderUsageEvidence(item) {
   const evidence = item.evidence;
   const metadata = item.metadata;
+  const installation = metadata.kind === "windows-machine" ? "Windows 관리자 설치" : metadata.kind === "user" ? "사용자 설치" : "설치 방식 보고 대기";
   const status = metadata.backfill_pending > 0 ? "기존 로그 복구 중" : evidence.length ? "복구된 요청별 기록" : metadata.version === "0.7.1" ? "해당 계정으로 확인된 요청 기록 대기" : "수집기 0.7.1 업데이트 대기";
   const count = value => value == null ? "기록 없음" : number.format(value);
-  return `<details class="usage-evidence"><summary>모델·추론·캐시 내역 · ${status}</summary>${evidence.length ? `<div class="table-wrap"><table><thead><tr><th>요청 모델 / 속도</th><th>추론 강도</th><th>입력</th><th>캐시 입력</th><th>출력</th><th>추론 (출력에 포함)</th></tr></thead><tbody>${evidence.map(row => `<tr><td>${escapeHtml(row.model)}<small>${escapeHtml(row.service_tier)} / ${escapeHtml(row.reasoning_mode)}</small></td><td>${escapeHtml(row.effort)}</td><td>${count(row.input_tokens)}</td><td>${count(row.cached_input_tokens)}</td><td>${count(row.output_tokens)}</td><td>${count(row.reasoning_output_tokens)}</td></tr>`).join("")}</tbody></table></div>` : "<p>로컬 로그와 계정 사용 구간을 대조해 복구합니다. 수집 전·계정 전환 내역을 검증할 수 없는 기록은 다른 계정에 붙이지 않습니다.</p>"}</details>`;
+  return `<details class="usage-evidence"><summary>모델·추론·캐시 내역 · ${status}</summary><p>보고된 수집기: ${escapeHtml(metadata.version || "미보고")} · ${installation}</p>${evidence.length ? `<div class="table-wrap"><table><thead><tr><th>요청 모델 / 속도</th><th>추론 강도</th><th>입력</th><th>캐시 입력</th><th>출력</th><th>추론 (출력에 포함)</th></tr></thead><tbody>${evidence.map(row => `<tr><td>${escapeHtml(row.model)}<small>${escapeHtml(row.service_tier)} / ${escapeHtml(row.reasoning_mode)}</small></td><td>${escapeHtml(row.effort)}</td><td>${count(row.input_tokens)}</td><td>${count(row.cached_input_tokens)}</td><td>${count(row.output_tokens)}</td><td>${count(row.reasoning_output_tokens)}</td></tr>`).join("")}</tbody></table></div>` : "<p>로컬 로그와 계정 사용 구간을 대조해 복구합니다. 수집 전·계정 전환 내역을 검증할 수 없는 기록은 다른 계정에 붙이지 않습니다.</p>"}</details>`;
 }
 
 function renderComparison(data) {
@@ -449,6 +469,7 @@ function render(data) {
   renderSummary(data);
   renderUsage(data);
   renderReconciliation(data);
+  renderQuotaContract(data);
   renderWeeklyBreakdown(data);
   renderComparison(data);
   renderAccounts(data.nodes);

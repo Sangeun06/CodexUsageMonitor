@@ -168,3 +168,19 @@ test("fractional quota stays visible in user values, totals and tooltips", () =>
   assert.equal(formatPercent(0.00001), '<0.0001%');
   assert.equal(formatPercent(null), '관측 대기');
 });
+
+test("actual plan and recent account change use provider values without a guessed denominator", () => {
+  const {context, elements} = createUi();
+  const contract = {plan_code: 'prolite', recent_changes: [{status: 'reported_increase', change_percent_points: 0.0321,
+    started_at: '2026-10-27T08:00:00Z', ended_at: '2026-10-27T08:02:00Z'}]};
+  context.renderQuotaContract({weekly_quota: {account_quota: contract}});
+  assert.match(elements.get('quotaPlan').textContent, /prolite/);
+  assert.match(elements.get('quotaCapacityNote').textContent, /절대 토큰·크레딧량을 제공하지/);
+  assert.match(elements.get('recentAccountChange').textContent, /0\.0321%p/);
+  contract.recent_changes[0].status = 'reported_unchanged';
+  contract.recent_changes[0].change_percent_points = 0;
+  context.renderQuotaContract({weekly_quota: {account_quota: contract}});
+  assert.match(elements.get('recentAccountChange').textContent, /변동 없음/);
+  assert.doesNotMatch(elements.get('recentAccountChange').textContent, /0\.00%/);
+  assert.match(elements.get('recentAccountRange').textContent, /실제 사용량 0으로 판정하지/);
+});

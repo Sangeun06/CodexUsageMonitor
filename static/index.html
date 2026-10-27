@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ko"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark" /><title>Codex Usage · 사용량 분석</title><link rel="stylesheet" href="/styles.css?v=20261027-4" /></head>
+<html lang="ko"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark" /><title>Codex Usage · 사용량 분석</title><link rel="stylesheet" href="/styles.css?v=20261027-5" /></head>
 <body><main class="shell">
 <header class="topbar"><div class="brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><p class="eyebrow">USAGE ANALYTICS</p><h1>Codex Usage</h1></div></div><div class="header-status"><div class="connection"><i></i><span id="connectionText">연결 중</span></div><span>업데이트 <strong id="lastUpdated">—</strong></span></div></header>
 <div class="dashboard-intro"><div><h2>누가, 언제, 얼마나 사용했나요?</h2><p>사용 기간과 집계 기준을 분리해 확인하세요. 모든 날짜별 분석은 UTC 기준입니다.</p></div><button id="manualRefresh" class="quiet-button">새로고침 ↻</button></div>
@@ -13,6 +13,7 @@
 <nav class="view-tabs" role="tablist" aria-label="사용량 분석 범위"><button id="tab-weekly" role="tab" aria-selected="true" aria-controls="view-weekly" data-view="weekly">주간 사용량</button><button id="tab-monthly" role="tab" aria-selected="false" tabindex="-1" aria-controls="view-monthly" data-view="monthly">월별 사용량</button><button id="tab-lifetime" role="tab" aria-selected="false" tabindex="-1" aria-controls="view-lifetime" data-view="lifetime">전체 누적</button><button id="tab-operations" role="tab" aria-selected="false" tabindex="-1" aria-controls="view-operations" data-view="operations">수집 상태 · 세션</button></nav>
 <section id="view-weekly" role="tabpanel" aria-labelledby="tab-weekly">
 <div class="scope-heading"><div><h2>현재 주간 주기</h2><p id="weeklyScope">계정 초기화 시각 기준 · 달력의 월–일과 다를 수 있습니다.</p></div><span class="scope-badge">주간 · WEEK</span></div>
+<section class="panel quota-contract" aria-label="실제 플랜과 제공처 한도"><div><strong id="quotaPlan">플랜 조회 중</strong><p id="quotaCapacityNote" class="data-note"></p></div><div><strong id="recentAccountChange">관측 대기</strong><p id="recentAccountRange" class="data-note"></p></div></section>
         <div class="period-metrics">
             <article><span>실제 주간 한도 사용률</span><strong id="weeklyUsedPercent">—</strong></article>
             <article><span>남은 주간 한도</span><strong id="weeklyRemainingPercent">—</strong></article>
@@ -162,4 +163,4 @@
         <div class="usage-empty" id="trendEmpty">확인된 세션 사용량이 아직 없습니다. 수집 시작 전 기록이나 미수집 구간은 표시되지 않습니다.</div>
       </section></details></section>
 <footer><span>본문·제목·경로·원본 ID는 수집하지 않습니다.</span><span id="refreshLabel">자동 새로고침</span></footer>
-</main><script src="/usage-view.js?v=20261027-4"></script><script src="/analytics-view.js?v=20261027-4"></script><script src="/accounts-view.js?v=20261027-4"></script><script src="/app.js?v=20261027-4"></script></body></html>
+</main><script src="/usage-view.js?v=20261027-5"></script><script src="/analytics-view.js?v=20261027-5"></script><script src="/accounts-view.js?v=20261027-5"></script><script src="/app.js?v=20261027-5"></script></body></html>

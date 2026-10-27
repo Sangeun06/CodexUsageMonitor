@@ -301,3 +301,7 @@ footer { color: var(--muted); font-size: 11px; }
 .usage-evidence summary { cursor: pointer; padding: 9px 0; }
 .usage-evidence table { font-size: 11px; }
 .usage-evidence td small { display: block; }
+.quota-contract { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; padding: 18px 22px; margin-top: 16px; }
+.quota-contract strong { font-size: 14px; }
+.quota-contract p { margin: 8px 0 0; }
+@media (max-width: 650px) { .quota-contract { grid-template-columns: 1fr; gap: 14px; padding: 16px; } }

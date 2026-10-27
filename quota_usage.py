@@ -11,6 +11,36 @@ from datetime import datetime, timezone
 from usage_aggregation import UsageWindow, utc_iso
 
 
+def account_quota_contract(account_usage, weekly, samples, now):
+    """Expose exactly what the authenticated provider reports, without a guessed denominator."""
+    limit = next((item for item in (account_usage or {}).get("rate_limits", [])
+                  if item.get("id") == weekly["limit_id"]), {})
+    recent = []
+    for seconds in (300, 900, 3600):
+        rows = [row for row in samples if now - seconds <= row["sampled_at"] <= now]
+        first, last = (rows[0], rows[-1]) if len(rows) >= 2 else (None, None)
+        delta = last["used_percent"] - first["used_percent"] if first is not None else None
+        recent.append({
+            "requested_seconds": seconds, "sample_count": len(rows),
+            "started_at": utc_iso(first["sampled_at"]) if first is not None else None,
+            "ended_at": utc_iso(last["sampled_at"]) if last is not None else None,
+            "start_percent": first["used_percent"] if first is not None else None,
+            "end_percent": last["used_percent"] if last is not None else None,
+            "change_percent_points": delta,
+            "status": "insufficient_samples" if delta is None else "provider_correction" if delta < 0
+                      else "reported_increase" if delta > 0 else "reported_unchanged",
+        })
+    return {
+        "source": "account/rateLimits/read", "scope": "account",
+        "plan_code": limit.get("plan"),
+        "provided_capacity": {"value": 100, "unit": "provider_percent"},
+        "absolute_capacity": {"value": None, "unit": None, "status": "not_reported_by_provider"},
+        "used_percent": weekly["used_percent"], "remaining_percent": 100 - weekly["used_percent"],
+        "window_minutes": weekly["window_minutes"], "resets_at": weekly["resets_at"],
+        "per_request_quota_available": False, "recent_changes": recent,
+    }
+
+
 def build_quota_usage(weekly, samples, events, users, now, account_tokens=None, calendar_days=()):
     if not weekly:
         return None
@@ -88,7 +118,7 @@ def build_quota_usage(weekly, samples, events, users, now, account_tokens=None, 
     }
 
 
-def read_quota_usage(db, account_key, weekly, users, now):
+def read_quota_usage(db, account_key, weekly, users, now, account_usage=None):
     if not weekly:
         return None
     window = UsageWindow.weekly(weekly, now)
@@ -107,6 +137,7 @@ def read_quota_usage(db, account_key, weekly, users, now):
         (account_key, window.start, window.end),
     ).fetchall()
     result = build_quota_usage(weekly, samples, events, users, now)
+    result["account_quota"] = account_quota_contract(account_usage, weekly, samples, now)
     details = {}
     for row in db.execute(
         """SELECT node_key, model, effort, service_tier, reasoning_mode, SUM(tokens) AS tokens,
@@ -120,7 +151,7 @@ def read_quota_usage(db, account_key, weekly, users, now):
     ):
         details.setdefault(row["node_key"], []).append(dict(row))
     metadata = {row["node_key"]: dict(row) for row in db.execute(
-        "SELECT node_key,version,backfill_pending FROM collector_usage_metadata WHERE account_key=?", (account_key,),
+        "SELECT node_key,version,kind,backfill_pending FROM collector_usage_metadata WHERE account_key=?", (account_key,),
     )}
     for user in result["user_usage"]:
         user["usage_details"] = details.get(user["node_key"], [])

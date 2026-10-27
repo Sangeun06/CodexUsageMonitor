@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix="codex-account-browser-") as directory:
                                     "usage_buckets": [{"at": now // 60 * 60 - 60, "tokens": tokens}]}],
                       "account_usage": {"source": "codex-app-server", "summary": {"lifetime_tokens": lifetime},
                                         "daily_usage": [{"date": datetime.now(timezone.utc).date().isoformat(), "tokens": lifetime}],
-                                        "rate_limits": [{"id": "codex", "primary": {"used_percent": 20 if key == "aaaaaaaaaaaa" else 3.125,
+                                        "rate_limits": [{"id": "codex", "plan": "prolite" if key == "aaaaaaaaaaaa" else "plus", "primary": {"used_percent": 20 if key == "aaaaaaaaaaaa" else 3.125,
                                             "window_minutes": 10080, "resets_at": now + 6 * 86400}}]}}, now=now)
     store.discover_account({"account": {"key": "cccccccccccc", "email": "candidate@example.test"}})
     store.collect(now=now)
