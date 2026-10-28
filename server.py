@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 from account_registry import initialize_accounts
 from quota_usage import read_quota_usage
+from model_usage import read_model_usage
 
 from collector import COLLECTOR_VERSION, read_app_server_usage
 from usage_analytics import EVENT_RETENTION_DAYS, read_analytics
@@ -1256,6 +1257,7 @@ class UsageStore:
             analytics = read_analytics(db, account_usage, weekly_usage, all_sessions, nodes, now, weekly_token_breakdown, account_key=self.collector_account_key())
             weekly_quota = read_quota_usage(db, self.collector_account_key(), weekly_usage,
                                            aggregate_users(weekly_attribution), now, account_usage)
+            model_usage = read_model_usage(db, self.collector_account_key(), weekly_usage, now)
         for session in sessions:
             session["created_at"] = utc_iso(session["created_at"])
             session["updated_at"] = utc_iso(session["updated_at"])
@@ -1300,6 +1302,7 @@ class UsageStore:
             "account_usage": account_usage,
             "weekly_usage": weekly_usage,
             "weekly_quota": weekly_quota,
+            "model_usage": model_usage,
             "weekly_token_breakdown": weekly_token_breakdown,
             "weekly_user_tokens": aggregate_users(weekly_attribution) if weekly_usage else None,
             "daily_user_trend": daily_user_trend,

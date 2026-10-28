@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ko"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark" /><title>Codex Usage · 사용량 분석</title><link rel="stylesheet" href="/styles.css?v=20261028-1" /></head>
+<html lang="ko"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark" /><title>Codex Usage · 사용량 분석</title><link rel="stylesheet" href="/styles.css?v=20261028-2" /></head>
 <body><main class="shell">
 <header class="topbar"><div class="brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><p class="eyebrow">USAGE ANALYTICS</p><h1>Codex Usage</h1></div></div><div class="header-status"><div class="connection"><i></i><span id="connectionText">연결 중</span></div><span>업데이트 <strong id="lastUpdated">—</strong></span></div></header>
 <div class="dashboard-intro"><div><h2>누가, 언제, 얼마나 사용했나요?</h2><p>사용 기간과 집계 기준을 분리해 확인하세요. 모든 날짜별 분석은 UTC 기준입니다.</p></div><button id="manualRefresh" class="quiet-button">새로고침 ↻</button></div>
@@ -72,6 +72,21 @@
         <div class="comparison-list" id="comparisonList"></div>
         <div class="usage-empty" id="comparisonEmpty">비교에 필요한 관측 샘플을 수집하는 중입니다.</div>
       </section>
+<section class="panel model-usage-panel" aria-labelledby="modelUsageTitle">
+  <div class="panel-heading"><div><p class="eyebrow">PROJECT · MODEL · TOKENS</p><h2 id="modelUsageTitle">프로젝트 · 모델별 사용 내역</h2></div></div>
+  <div class="explorer-toolbar"><label>기간 <select id="modelUsageScope"><option value="weekly">현재 주간 주기</option><option value="recovered">최근 14일 복구 내역</option></select></label><label>사용자 <select id="modelUsageNode"><option value="all">전체 사용자</option></select></label></div>
+  <p id="modelUsageRange" class="data-note panel-note"></p>
+  <div class="period-metrics"><article><span>요청 로그의 처리 토큰</span><strong id="modelUsageTokens">—</strong></article><article><span>Standard 기준 환산 크레딧</span><strong id="modelUsageCredits">—</strong><small>공개 단가 적용 · 실제 청구량과 별도</small></article><article><span>환산에서 제외한 토큰</span><strong id="modelUsageUnpriced">—</strong><small>단가 또는 세부 토큰 미확인</small></article></div>
+  <div class="table-wrap model-usage-scroll"><table><thead><tr><th>사용자 / 서버</th><th>프로젝트</th><th>요청 모델 / 추론 / 속도</th><th>전체 토큰</th><th>비캐시 입력</th><th>캐시 입력</th><th>출력</th><th>환산 크레딧</th></tr></thead><tbody id="modelUsageRows"></tbody></table></div>
+  <p id="modelUsageEmpty" class="data-note panel-note">선택한 기간에 복구된 요청 상세가 없습니다. 다른 기간을 선택하거나 수집 상태를 확인하세요.</p>
+  <p id="modelUsageCoverage" class="data-note panel-note"></p>
+  <details class="model-rate-card"><summary>모델별 기준표 · 계산식 · 한도 % 환산 조건</summary>
+    <p class="data-note">크레딧 / 100만 토큰 · Standard 속도 · 공식 문서 확인 <span id="modelRateVerified">—</span> · <a href="https://learn.chatgpt.com/docs/pricing#token-rates" target="_blank" rel="noopener noreferrer">OpenAI 공식 기준표</a></p>
+    <div class="table-wrap"><table><thead><tr><th>모델</th><th>비캐시 입력</th><th>캐시 입력</th><th>출력</th></tr></thead><tbody id="modelRateRows"></tbody></table></div>
+    <p class="data-note">환산 크레딧 = ((입력 − 캐시 입력) × 입력 단가 + 캐시 입력 × 캐시 단가 + 출력 × 출력 단가) ÷ 1,000,000. 추론 출력은 출력에 포함되어 다시 더하지 않습니다. 추론 강도에 임의 배수를 붙이지 않습니다. 실제 속도가 미기록이어도 이 열은 Standard 기준으로 비교합니다.</p>
+    <p class="data-note">기본 한도 대비 %를 구하려면 기본 한도용 차감 규칙과 플랜 100%에 해당하는 총량이 필요합니다. 공식 크레딧 표는 추가 크레딧·크레딧 요금제용이며 기본 구독 한도를 결정하지 않습니다. Fast도 기본 한도 2.5배와 유료 크레딧 2배로 다릅니다. 따라서 환산 크레딧 비중에 계정 사용률을 곱하지 않습니다. <a href="https://learn.chatgpt.com/docs/agent-configuration/speed" target="_blank" rel="noopener noreferrer">공식 속도별 기준</a></p>
+  </details>
+</section>
 <section class="panel"><div class="panel-heading"><h2>계정 사용 한도</h2><div class="legend" id="usageFreshness"></div></div><div class="rate-limit-grid" id="rateLimitGrid"></div><div class="usage-empty" id="usageEmpty">계정 전체 사용량 수집 대기 중</div></section>
 </section>
 <section id="view-monthly" role="tabpanel" aria-labelledby="tab-monthly" hidden><div class="scope-heading"><div><h2>월별 토큰 처리량</h2><p>달력 월의 1일부터 말일까지 · UTC · 한도 소모율과 별도인 토큰 처리량</p></div><label class="month-picker">조회 월 <select id="monthSelect" aria-label="조회 월"></select></label></div>
@@ -163,4 +178,4 @@
         <div class="usage-empty" id="trendEmpty">확인된 세션 사용량이 아직 없습니다. 수집 시작 전 기록이나 미수집 구간은 표시되지 않습니다.</div>
       </section></details></section>
 <footer><span>본문·제목·경로·원본 ID는 수집하지 않습니다.</span><span id="refreshLabel">자동 새로고침</span></footer>
-</main><script src="/usage-view.js?v=20261028-1"></script><script src="/analytics-view.js?v=20261028-1"></script><script src="/accounts-view.js?v=20261028-1"></script><script src="/app.js?v=20261028-1"></script></body></html>
+</main><script src="/usage-view.js?v=20261028-2"></script><script src="/analytics-view.js?v=20261028-2"></script><script src="/accounts-view.js?v=20261028-2"></script><script src="/app.js?v=20261028-2"></script></body></html>

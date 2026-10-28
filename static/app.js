@@ -1,4 +1,4 @@
-const state = { data: null, query: "", expanded: new Set(), month: null, view: "weekly", explorers: null, accountKey: null, refreshSequence: 0 };
+const state = { data: null, query: "", expanded: new Set(), month: null, view: "weekly", explorers: null, accountKey: null, refreshSequence: 0, modelScope: "weekly", modelNode: "all" };
 const $ = (id) => document.getElementById(id);
 const number = new Intl.NumberFormat("ko-KR");
 const compactNumber = new Intl.NumberFormat("ko-KR", { notation: "compact", maximumFractionDigits: 1 });
@@ -465,6 +465,44 @@ function renderSessions(sessions) {
   $("emptyTable").style.display = groups.length ? "none" : "grid";
 }
 
+function renderModelUsage(data) {
+  const usage = data.model_usage;
+  const scope = usage?.scopes?.[state.modelScope];
+  const nodes = new Map((data.nodes || []).map(node => [node.key, node]));
+  const nodeName = key => {
+    const node = nodes.get(key);
+    return node ? `${node.display_name || node.os_user} · ${node.hostname}` : key;
+  };
+  const nodeKeys = [...new Set((scope?.rows || []).map(row => row.node_key))];
+  if (!nodeKeys.includes(state.modelNode)) state.modelNode = "all";
+  $("modelUsageNode").innerHTML = '<option value="all">전체 사용자</option>' + nodeKeys.map(key => `<option value="${escapeHtml(key)}">${escapeHtml(nodeName(key))}</option>`).join("");
+  $("modelUsageNode").value = state.modelNode;
+  $("modelUsageScope").value = state.modelScope;
+  const rows = (scope?.rows || []).filter(row => state.modelNode === "all" || row.node_key === state.modelNode);
+  const tokens = rows.reduce((sum, row) => sum + row.tokens, 0);
+  const unpriced = rows.reduce((sum, row) => sum + row.reference_unpriced_tokens, 0);
+  const priced = rows.filter(row => row.standard_reference_credits != null);
+  const creditFormat = new Intl.NumberFormat("ko-KR", {minimumFractionDigits: 2, maximumFractionDigits: 4});
+  const creditLabel = value => value > 0 && value < 0.0001 ? "<0.0001" : creditFormat.format(value);
+  $("modelUsageTokens").textContent = number.format(tokens);
+  $("modelUsageCredits").textContent = priced.length ? creditLabel(priced.reduce((sum, row) => sum + row.standard_reference_credits, 0)) : "—";
+  $("modelUsageUnpriced").textContent = number.format(unpriced);
+  $("modelUsageRange").textContent = scope?.started_at ? `${new Date(scope.started_at).toLocaleString("ko-KR")} → ${new Date(scope.ended_at).toLocaleString("ko-KR")} · 복구된 요청 로그 기준 · 보관 세션 포함` : "주간 한도 기간 대기 중 · 최근 14일 복구 내역을 선택할 수 있습니다.";
+  $("modelUsageRows").innerHTML = rows.map(row => {
+    const input = row.input_tokens, cache = row.cached_input_tokens;
+    const uncached = input != null && cache != null && cache <= input ? number.format(input - cache) : "—";
+    const count = field => row[field] == null ? "—" : number.format(row[field]);
+    const cost = row.standard_reference_credits == null
+      ? (row.reference_missing_reasons?.model_rate_unpublished != null ? "공개 단가 없음" : "세부 토큰 미확인")
+      : creditLabel(row.standard_reference_credits) + (row.reference_status === "partial" ? " · 일부" : "");
+    return `<tr><td>${escapeHtml(nodeName(row.node_key))}</td><td>${escapeHtml(row.project_name || "프로젝트 기록 없음")}</td><td>${escapeHtml(row.model)}<small>추론 ${escapeHtml(row.effort)} · 속도 ${escapeHtml(row.service_tier)}</small></td><td class="tokens">${number.format(row.tokens)}</td><td>${uncached}</td><td>${count("cached_input_tokens")}</td><td>${count("output_tokens")}<small>추론 포함 ${count("reasoning_output_tokens")}</small></td><td>${cost}</td></tr>`;
+  }).join("");
+  $("modelUsageEmpty").hidden = rows.length > 0;
+  $("modelUsageCoverage").textContent = `${number.format(tokens)} 토큰의 모델별 요청 내역 · Standard 기준 환산 · 단가 또는 세부 토큰이 없는 ${number.format(unpriced)} 토큰은 환산 합계에서 제외합니다. 이 표는 수집된 로그 범위이며 계정 전체 사용량과 다를 수 있습니다.`;
+  $("modelRateRows").innerHTML = (usage?.rate_card?.rates || []).map(rate => `<tr><td>${escapeHtml(rate.model)}</td><td>${rate.input}</td><td>${rate.cached_input}</td><td>${rate.output}</td></tr>`).join("");
+  $("modelRateVerified").textContent = usage?.rate_card?.verified_at || "—";
+}
+
 function render(data) {
   state.data = data;
   state.accountKey = data.selected_account_key;
@@ -478,6 +516,7 @@ function render(data) {
   renderAccounts(data.nodes);
   renderDailyUserTrend(data);
   renderAnalytics(data);
+  renderModelUsage(data);
   const weekly = data.weekly_usage;
   if (weekly?.points?.length) {
     renderChart(weekly.points, "used_percent", true, { start: weekly.window_started_at, end: weekly.resets_at });
@@ -519,6 +558,8 @@ async function refresh(force = false) {
 }
 
 $("searchInput").addEventListener("input", event => { state.query = event.target.value; if (state.data) renderSessions(state.data.sessions); });
+$("modelUsageScope").addEventListener("change", event => { state.modelScope = event.target.value; if (state.data) renderModelUsage(state.data); });
+$("modelUsageNode").addEventListener("change", event => { state.modelNode = event.target.value; if (state.data) renderModelUsage(state.data); });
 $("monthSelect").addEventListener("change", event => { state.month = event.target.value; if (state.data) renderAnalytics(state.data); });
 $("monthComparison").addEventListener("click", event => { const month = event.target.closest("[data-month]")?.dataset.month; if (month) { state.month = month; renderAnalytics(state.data); } });
 $("manualRefresh").addEventListener("click", refresh);

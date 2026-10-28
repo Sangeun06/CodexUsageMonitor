@@ -302,6 +302,13 @@ footer { color: var(--muted); font-size: 11px; }
 .usage-evidence summary { cursor: pointer; padding: 9px 0; }
 .usage-evidence table { font-size: 11px; }
 .usage-evidence td small { display: block; }
+.model-usage-scroll { max-height: 520px; }
+.model-usage-scroll thead { position: sticky; top: 0; background: var(--panel, #0e1914); z-index: 1; }
+.model-usage-scroll td small { display: block; color: var(--muted); font-size: 10px; margin-top: 4px; }
+.model-usage-panel .period-metrics { margin: 16px; }
+.model-rate-card { padding: 0 20px 20px; }
+.model-rate-card summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 10px 0; }
+.model-rate-card a { color: var(--mint, #63d6a3); }
 .quota-contract { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; padding: 18px 22px; margin-top: 16px; }
 .quota-contract strong { font-size: 14px; }
 .quota-contract p { margin: 8px 0 0; }

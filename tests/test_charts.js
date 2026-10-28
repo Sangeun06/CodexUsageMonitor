@@ -189,3 +189,31 @@ test("actual plan and recent account change use provider values without a guesse
   context.renderQuotaContract({weekly_quota: {account_quota: contract}});
   assert.match(elements.get('recentAccountChange').textContent, /1\.00%p/);
 });
+
+test("project/model evidence shows cache-adjusted Standard credits and clears on account change", () => {
+  const {context, elements} = createUi();
+  const data = {nodes: [{key: 'n', display_name: 'User', hostname: 'PC'}], model_usage: {
+    scopes: {weekly: {started_at: '2026-10-21T00:00:00Z', ended_at: '2026-10-28T00:00:00Z', rows: [
+      {node_key: 'n', project_name: '<project>', model: 'gpt-6.1-sol', effort: 'high', service_tier: 'unknown',
+       tokens: 1100000, input_tokens: 1000000, cached_input_tokens: 900000, output_tokens: 100000,
+       reasoning_output_tokens: 50000, standard_reference_credits: 32.25, reference_unpriced_tokens: 0},
+      {node_key: 'n', project_name: '<project>', model: 'codex-auto-review', tokens: 20,
+       standard_reference_credits: null, reference_unpriced_tokens: 20, reference_missing_reasons: {model_rate_unpublished: 20}},
+    ]}}, rate_card: {verified_at: '2026-10-28', rates: [{model: 'gpt-6.1-sol', input: 50, cached_input: 2.5, output: 250}]},
+  }};
+  context.renderModelUsage(data);
+  assert.equal(elements.get('modelUsageTokens').textContent, '1,100,020');
+  assert.equal(elements.get('modelUsageCredits').textContent, '32.25');
+  assert.equal(elements.get('modelUsageUnpriced').textContent, '20');
+  const html = elements.get('modelUsageRows').innerHTML;
+  assert.match(html, /&lt;project&gt;/);
+  assert.match(html, /100,000/);
+  assert.match(html, /900,000/);
+  assert.match(html, /추론 포함 50,000/);
+  assert.match(html, /공개 단가 없음/);
+  assert.doesNotMatch(html, /0\.00%|NaN|Infinity/);
+  context.renderModelUsage({nodes: [], model_usage: {scopes: {weekly: {rows: []}}}});
+  assert.equal(elements.get('modelUsageRows').innerHTML, '');
+  assert.equal(elements.get('modelUsageCredits').textContent, '—');
+  assert.equal(elements.get('modelUsageEmpty').hidden, false);
+});
