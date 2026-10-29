@@ -45,7 +45,7 @@ test('weekly overview includes undated users and the canonical untracked share',
   const overview = { ...day, date: '__weekly', scope: 'weekly' };
   assert.deepEqual(segments(overview).map(part => part.share), [20, 10, 70]);
   assert.match(donutMarkup(overview, colors), /주간 전체 집계량/);
-  assert.match(breakdownRows(overview, new Map(), colors), /700<\/td><td>70\.00%/);
+  assert.match(breakdownRows(overview, new Map(), colors), /700<\/td><td>70\.0%/);
   assert.match(chartMarkup([day], colors, '__weekly'), /tabindex="0"/);
 });
 test('weekly overview with an unknown denominator does not normalize users to 100%', () => {
@@ -69,11 +69,11 @@ test('weekly quota charts and inspector share actual allowance percentages', () 
   const report = quotaReport({ days: [day], overview: {...day, scope: 'weekly', date: '__weekly'} }, quota);
   const overview = report.overview;
   assert.deepEqual(segments(overview).map(part => part.share), [4, 1, 5, 90]);
-  assert.match(donutMarkup(overview, colors), /10\.00%/);
-  assert.match(breakdownRows(overview, new Map(), colors), /100<\/td><td>1\.00%/);
+  assert.match(donutMarkup(overview, colors), /10\.0%/);
+  assert.match(breakdownRows(overview, new Map(), colors), /100<\/td><td>1\.0%/);
   const daily = report.days[0];
   assert.deepEqual(segments(daily).map(part => part.share), [4, 1]);
-  assert.match(chartMarkup([daily], colors, daily.date), /5\.00%/);
+  assert.match(chartMarkup([daily], colors, daily.date), /5\.0%/);
   assert.match(donutMarkup(daily, colors), /당일 관측 소모/);
   assert.doesNotMatch(donutMarkup(daily, colors), /stroke-dasharray="80/);
 });
@@ -82,18 +82,18 @@ test('token-only dates keep missing quota unknown rather than drawing token shar
   const report = quotaReport({ days: [day], overview: {...day, scope: 'weekly'} }, null);
   assert.deepEqual(segments(report.days[0]), []);
   assert.match(chartMarkup(report.days, colors, day.date), /usage-activity-marker/);
-  assert.match(breakdownRows(report.days[0], new Map(), colors), /사용 확인 · 비율 미확정/);
+  assert.match(breakdownRows(report.days[0], new Map(), colors), /—/);
   assert.doesNotMatch(donutMarkup(report.overview, colors), /stroke-dasharray/);
-  assert.match(donutMarkup(report.days[0], colors), /사용 확인/);
-  assert.doesNotMatch(donutMarkup(report.days[0], colors), />0\.00%</);
+  assert.match(donutMarkup(report.days[0], colors), /—/);
+  assert.doesNotMatch(donutMarkup(report.days[0], colors), />0\.0%</);
 });
 
 test('positive usage logs are not shown as zero when the provider percentage is unchanged', () => {
   const unchanged = {...day, unit: 'quota_percent', quota: {used_percent: 0, users: {}, unattributed_percent: 0}};
   assert.match(chartMarkup([unchanged], colors, day.date), /usage-activity-marker/);
   assert.doesNotMatch(chartMarkup([unchanged], colors, day.date), /관측 한도 증가 0%/);
-  assert.match(donutMarkup(unchanged, colors), /사용 확인/);
-  assert.doesNotMatch(donutMarkup(unchanged, colors), />0\.00%</);
+  assert.match(donutMarkup(unchanged, colors), /—/);
+  assert.doesNotMatch(donutMarkup(unchanged, colors), />0\.0%</);
 });
 
 test('weekly inspector ignores obsolete token-derived estimates', () => {
@@ -102,5 +102,5 @@ test('weekly inspector ignores obsolete token-derived estimates', () => {
     user_usage: [{node_key: 'a', used_percent: null, estimated_used_percent: 18}]};
   const report = quotaReport({days: [], overview: {...day, scope: 'weekly', date: '__weekly'}}, quota);
   assert.deepEqual(segments(report.overview).map(part => part.share), [20, 80]);
-  assert.doesNotMatch(breakdownRows(report.overview, new Map(), colors), /18\.00%/);
+  assert.doesNotMatch(breakdownRows(report.overview, new Map(), colors), /18\.0%/);
 });

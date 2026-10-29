@@ -50,7 +50,7 @@ def profile_snapshot(profile: Path, token: str, include_rollout_path: bool = Fal
     state_db = codex_dir / "state_5.sqlite"
     return {
         "version": 1,
-        "collector": {"version": COLLECTOR_VERSION, "kind": "windows-machine"},
+        "collector": {"version": COLLECTOR_VERSION, "kind": "windows-machine", "observed_at": int(time.time())},
         "node": {
             "key": hashlib.sha256(f"{hostname}:{os_user}".encode()).hexdigest()[:12],
             "hostname": hostname,

@@ -1,0 +1,26 @@
+Codex Usage Monitor 0.7.5
+
+Usage accounting
+- Recover request deltas from cumulative-only token records and suppress repeated usage events.
+- Preserve request-time model, reasoning effort and speed changes. Cache remains part of input; reasoning remains part of output.
+- Exclude replayed parent history using subagent markers and locally available legacy fork histories.
+- Match compaction response records in either order and avoid counting covered local snapshots twice.
+
+Historical correction
+- Rebuild recent 14-day request details using the existing account continuity ledger.
+- Replace complete corrected session histories atomically, including downward corrections. Incomplete backfills preserve existing history.
+- Reject stale reports and older collector versions after an upgrade.
+
+Dashboard
+- Match user, weekly session and project/model token totals to the same request-detail period.
+- Calculate model quota equivalents from Standard reference credits and observed calibration windows; keep unallocated usage separate.
+- Remove forced allocation to the account total. Show estimation excess when conversion exceeds the provider meter.
+- Use concise attribution labels and display percentages to one decimal place while retaining calculation precision.
+
+Upgrade
+- Existing connected collectors receive signed updates automatically. A stopped or disconnected Windows task must reconnect before it can update.
+- Preserve the existing collector token, state and logs. Public installers contain no credential; the Windows machine installer retains the existing token when its token field is left empty.
+- Backfill runs over multiple scans. Missing logs, unavailable legacy parent files and compressed JSONL histories cannot be completely reconstructed by this collector.
+- Standard reference credits are not an official fixed conversion to included subscription quota.
+
+Validation: 143 Python regression tests and the chart/analytics JavaScript suites passed.

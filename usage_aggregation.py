@@ -130,6 +130,9 @@ def attribute_sessions(
             else:
                 possible = current
         event = max(0, events.get(key, 0))
+        details_since = session.get("usage_details_since")
+        if details_since is not None and window.start >= details_since:
+            snapshot, possible = 0, 0
         tokens = max(snapshot, event)
         result[key] = SessionUsage(tokens, event, snapshot, max(tokens, possible), coverage_start)
     for key, event in events.items():

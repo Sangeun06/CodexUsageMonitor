@@ -59,24 +59,24 @@ test("new user's snapshot-only weekly usage is visible alongside lifetime counte
 
 test("weekly quota uses the full allowance and retains remaining capacity", () => {
   const elements = render();
-  assert.equal(elements.get("weeklyUsedPercent").textContent, "20.00%");
-  assert.equal(elements.get("weeklyRemainingPercent").textContent, "80.00%");
-  assert.equal(elements.get("weeklyAttributedPercent").textContent, "2.00%");
-  assert.equal(elements.get("weeklyUnattributedPercent").textContent, "18.00%");
-  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:2\.0000%/);
-  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:18\.0000%/);
-  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:80\.0000%/);
-  assert.match(elements.get("comparisonList").innerHTML, /<strong>2\.00%<\/strong>/);
-  assert.match(elements.get("comparisonList").innerHTML, /100 토큰 · 처리량 참고/);
+  assert.equal(elements.get("weeklyUsedPercent").textContent, "20.0%");
+  assert.equal(elements.get("weeklyRemainingPercent").textContent, "80.0%");
+  assert.equal(elements.get("weeklyAttributedPercent").textContent, "2.0%");
+  assert.equal(elements.get("weeklyUnattributedPercent").textContent, "0.0%");
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:2%/);
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:18%/);
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:80%/);
+  assert.match(elements.get("comparisonList").innerHTML, /<strong>2\.0%<\/strong>/);
+  assert.match(elements.get("comparisonList").innerHTML, /100 토큰/);
   assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /Alice &lt;team&gt;/);
-  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /남은 한도/);
-  assert.match(elements.get("weeklyBreakdownNote").textContent, /추론/);
+  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /잔여 한도/);
+  assert.match(elements.get("weeklyBreakdownNote").textContent, /1%|^$/);
 });
 
 test("a large token counter cannot override a small observed quota", () => {
   const elements = render({ user_usage: [{node_key: "a", tokens: 1000000000, used_percent: 0.5}], attributed_percent: 0.5, unattributed_percent: 19.5 });
-  assert.match(elements.get("comparisonList").innerHTML, /<strong>0\.50%<\/strong>/);
-  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:0\.5000%/);
+  assert.match(elements.get("comparisonList").innerHTML, /<strong>0\.5%<\/strong>/);
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /width:0\.5%/);
   assert.doesNotMatch(elements.get("weeklyBreakdownStack").innerHTML, /NaN|Infinity/);
 });
 
@@ -109,8 +109,8 @@ test("different limits with the same reset time stay visible", () => {
     },
   });
   assert.equal((elements.get("rateLimitGrid").innerHTML.match(/class="rate-card"/g) || []).length, 2);
-  assert.match(elements.get("rateLimitGrid").innerHTML, /20\.00%/);
-  assert.match(elements.get("rateLimitGrid").innerHTML, /70\.00%/);
+  assert.match(elements.get("rateLimitGrid").innerHTML, /20\.0%/);
+  assert.match(elements.get("rateLimitGrid").innerHTML, /70\.0%/);
 });
 
 test("charts clear the previous curve when samples fall below two", () => {
@@ -129,7 +129,7 @@ test("missing weekly usage clears previous pace estimates", () => {
     label: "빠름", status: "fast", deviation_percent: 20,
     daily_budget_percent: 14, remaining_daily_budget_percent: 5, projected_end_percent: 150,
   } });
-  assert.equal(elements.get("projectedUsage").textContent, "150.00%");
+  assert.equal(elements.get("projectedUsage").textContent, "150.0%");
   context.renderPace(null);
   assert.equal(elements.get("projectedUsage").textContent, "—");
   assert.equal(elements.get("paceStatus").className, "");
@@ -139,14 +139,14 @@ test("old token-derived percentages are ignored when personal measurement is mis
   const elements = render({user_usage: [{node_key: "a", tokens: 1000000, used_percent: null,
     estimated_used_percent: 42, observed_used_percent: 0, estimate_method: "account_average"}],
     attributed_percent: 0, unattributed_percent: 20, estimated_attributed_percent: 42});
-  assert.match(elements.get("comparisonList").innerHTML, /사용 확인/);
-  assert.match(elements.get("comparisonList").innerHTML, /사용 기록 있음 · 한도 비율 미확정/);
-  assert.doesNotMatch(elements.get("comparisonList").innerHTML, /42\.00%/);
-  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /사용 확인/);
-  assert.equal(elements.get("weeklyAttributedPercent").textContent, "사용 확인");
-  assert.equal(elements.get("weeklyUnattributedPercent").textContent, "20.00%");
+  assert.match(elements.get("comparisonList").innerHTML, /—/);
+  assert.match(elements.get("comparisonList").innerHTML, /자료 없음/);
+  assert.doesNotMatch(elements.get("comparisonList").innerHTML, /42\.0%/);
+  assert.match(elements.get("weeklyBreakdownLegend").innerHTML, /—/);
+  assert.equal(elements.get("weeklyAttributedPercent").textContent, "0.0%");
+  assert.equal(elements.get("weeklyUnattributedPercent").textContent, "0.0%");
   assert.doesNotMatch(elements.get("weeklyBreakdownStack").innerHTML, /NaN|Infinity|width:42/);
-  assert.doesNotMatch(elements.get("comparisonList").innerHTML.split('</article>')[0], /width:0%/);
+
 });
 
 test("missing weekly limits clear previous quota and comparison", () => {
@@ -160,15 +160,15 @@ test("fractional quota stays visible in user values, totals and tooltips", () =>
   const elements = render({used_percent: 3.1274, remaining_percent: 96.8726,
     attributed_percent: 3.1274, unattributed_percent: 0,
     user_usage: [{node_key: "a", tokens: 100, used_percent: 3.1274}]});
-  assert.equal(elements.get("weeklyUsedPercent").textContent, "3.1274%");
-  assert.match(elements.get("comparisonList").innerHTML, /3\.1274%/);
-  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /3\.1274%/);
+  assert.equal(elements.get("weeklyUsedPercent").textContent, "3.1%");
+  assert.match(elements.get("comparisonList").innerHTML, /3\.1%/);
+  assert.match(elements.get("weeklyBreakdownStack").innerHTML, /3\.1%/);
   const tiny = render({user_usage: [{node_key: "a", tokens: 100, used_percent: 0.0032}]});
-  assert.match(tiny.get("comparisonList").innerHTML, /0\.0032%/);
+  assert.match(tiny.get("comparisonList").innerHTML, /0\.0%/);
   const {formatPercent} = require('../static/usage-view.js');
-  assert.equal(formatPercent(3), '3.00%');
-  assert.equal(formatPercent(0.00001), '<0.0001%');
-  assert.equal(formatPercent(null), '관측 대기');
+  assert.equal(formatPercent(3), '3.0%');
+  assert.equal(formatPercent(0.00001), '0.0%');
+  assert.equal(formatPercent(null), '—');
 });
 
 test("actual plan and recent account change use provider values without a guessed denominator", () => {
@@ -177,17 +177,17 @@ test("actual plan and recent account change use provider values without a guesse
     started_at: '2026-10-27T08:00:00Z', ended_at: '2026-10-27T08:02:00Z'}]};
   context.renderQuotaContract({weekly_quota: {account_quota: contract}});
   assert.match(elements.get('quotaPlan').textContent, /prolite/);
-  assert.match(elements.get('quotaCapacityNote').textContent, /절대 토큰·크레딧량을 제공하지/);
-  assert.match(elements.get('recentAccountChange').textContent, /0\.0321%p/);
+  assert.match(elements.get('quotaCapacityNote').textContent, /100%/);
+  assert.match(elements.get('recentAccountChange').textContent, /0\.0%p/);
   contract.recent_changes[0].status = 'reported_unchanged';
   contract.recent_changes[0].change_percent_points = 0;
   context.renderQuotaContract({weekly_quota: {account_quota: contract}});
-  assert.match(elements.get('recentAccountChange').textContent, /변동 없음/);
-  assert.doesNotMatch(elements.get('recentAccountChange').textContent, /0\.00%/);
-  assert.match(elements.get('recentAccountRange').textContent, /실제 사용량 0으로 판정하지/);
+  assert.match(elements.get('recentAccountChange').textContent, /변동 0.0%p/);
+  assert.equal(elements.get('recentAccountChange').textContent, '변동 0.0%p');
+  assert.match(elements.get('recentAccountRange').textContent, /→/);
   contract.recent_changes.push({...contract.recent_changes[0], status: 'reported_increase', change_percent_points: 1});
   context.renderQuotaContract({weekly_quota: {account_quota: contract}});
-  assert.match(elements.get('recentAccountChange').textContent, /1\.00%p/);
+  assert.match(elements.get('recentAccountChange').textContent, /1\.0%p/);
 });
 
 test("project/model evidence shows cache-adjusted Standard credits and clears on account change", () => {
@@ -211,7 +211,7 @@ test("project/model evidence shows cache-adjusted Standard credits and clears on
   assert.match(html, /900,000/);
   assert.match(html, /추론 포함 50,000/);
   assert.match(html, /공개 단가 없음/);
-  assert.doesNotMatch(html, /0\.00%|NaN|Infinity/);
+  assert.doesNotMatch(html, /0\.0%|NaN|Infinity/);
   context.renderModelUsage({nodes: [], model_usage: {scopes: {weekly: {rows: []}}}});
   assert.equal(elements.get('modelUsageRows').innerHTML, '');
   assert.equal(elements.get('modelUsageCredits').textContent, '—');

@@ -64,6 +64,8 @@ def calendar_report(start, end, now, account_days, events, sessions, visible, wi
             per_session[(event["date"], event["node_key"], event["session_key"])] = [int(event["tokens"]), 0]
     for session in sessions:
         created, updated = int(session.get("created_at") or 0), int(session.get("updated_at") or 0)
+        if session.get("usage_details_since") is not None and created >= session["usage_details_since"]:
+            continue
         if session["node_key"] not in visible or not (0 < window.start <= created <= updated <= window.end):
             continue
         day = date_of(created)

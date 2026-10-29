@@ -150,3 +150,44 @@ class QuotaUsageTest(unittest.TestCase):
         self.assertEqual(result["sample_count"], 2)
         self.assertEqual(result["attributed_percent"], 5)
         self.assertEqual(result["user_usage"][0]["node_key"], "cheap")
+
+class ReconciliationRegressionTest(unittest.TestCase):
+    def test_user_tokens_match_project_details_not_snapshot_counter(self):
+        from quota_usage import reconcile_quota_usage
+        quota = {'used_percent': 4, 'user_usage': [dict(node_key='windows', tokens=690731525,
+                    used_percent=None, observed_used_percent=None)]}
+        model = {'scopes': {'weekly': {'rows': [
+            dict(node_key='windows', tokens=777543, standard_reference_credits=2.29987,
+                 estimated_quota_percent=.02, reference_unpriced_tokens=0),
+            dict(node_key='windows', tokens=81086, standard_reference_credits=None,
+                 estimated_quota_percent=None, reference_unpriced_tokens=81086)]}}}
+        reconcile_quota_usage(quota, model)
+        user = quota['user_usage'][0]
+        self.assertEqual(user['tokens'], 858629)
+        self.assertEqual(user['counter_based_tokens'], 690731525)
+        self.assertEqual(user['reference_unpriced_tokens'], 81086)
+        self.assertAlmostEqual(user['standard_reference_credits'], 2.29987)
+
+    def test_account_residual_is_not_forced_into_model_estimates(self):
+        from quota_usage import reconcile_quota_usage
+        quota = {'used_percent': 3.0, 'user_usage': [
+            {'node_key': 'a', 'tokens': 100, 'used_percent': None, 'observed_used_percent': None}]}
+        model = {'scopes': {'weekly': {'rows': [dict(node_key='a', tokens=100,
+                    standard_reference_credits=10, estimated_quota_percent=.4)]}}}
+        reconcile_quota_usage(quota, model)
+        self.assertAlmostEqual(quota['estimated_percent'], .4)
+        self.assertAlmostEqual(quota['unattributed_percent'], 2.6)
+        self.assertAlmostEqual(quota['user_usage'][0]['display_used_percent'], .4)
+        self.assertEqual(quota['observed_percent'], 0)
+
+    def test_observations_and_raw_model_estimates_are_preserved(self):
+        from quota_usage import reconcile_quota_usage
+        quota = {'used_percent': 3.0, 'user_usage': [
+            {'node_key': 'a', 'tokens': 100, 'used_percent': 1, 'observed_used_percent': 1}]}
+        model = {'scopes': {'weekly': {'rows': [dict(node_key='a', tokens=100,
+                    standard_reference_credits=10, estimated_quota_percent=10)]}}}
+        reconcile_quota_usage(quota, model)
+        self.assertEqual(quota['observed_percent'], 1)
+        self.assertEqual(quota['estimated_percent'], 9)
+        self.assertEqual(quota['over_estimated_percent'], 7)
+        self.assertEqual(quota['unattributed_percent'], 0)

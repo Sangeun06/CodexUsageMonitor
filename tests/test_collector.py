@@ -191,7 +191,7 @@ class CollectorTest(unittest.TestCase):
             self.assertTrue(apply_collector_update(update, root))
             self.assertEqual(target.read_bytes(), content)
             self.assertEqual((root / "collector.py.previous").read_text(), "OLD = True\n")
-            self.assertEqual(COLLECTOR_VERSION, "0.7.1")
+            self.assertEqual(COLLECTOR_VERSION, "0.7.5")
 
     def test_request_metadata_preserves_model_switches_and_cache_without_content(self):
         with tempfile.TemporaryDirectory() as directory:

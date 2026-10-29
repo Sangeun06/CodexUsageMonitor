@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ko"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark" /><title>Codex Usage · 사용량 분석</title><link rel="stylesheet" href="/styles.css?v=20261028-2" /></head>
+<html lang="ko"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark" /><title>Codex Usage · 사용량 분석</title><link rel="stylesheet" href="/styles.css?v=20261029-attribution" /></head>
 <body><main class="shell">
 <header class="topbar"><div class="brand"><div class="brand-mark"><span></span><span></span><span></span></div><div><p class="eyebrow">USAGE ANALYTICS</p><h1>Codex Usage</h1></div></div><div class="header-status"><div class="connection"><i></i><span id="connectionText">연결 중</span></div><span>업데이트 <strong id="lastUpdated">—</strong></span></div></header>
 <div class="dashboard-intro"><div><h2>누가, 언제, 얼마나 사용했나요?</h2><p>사용 기간과 집계 기준을 분리해 확인하세요. 모든 날짜별 분석은 UTC 기준입니다.</p></div><button id="manualRefresh" class="quiet-button">새로고침 ↻</button></div>
@@ -17,14 +17,14 @@
         <div class="period-metrics">
             <article><span>실제 주간 한도 사용률</span><strong id="weeklyUsedPercent">—</strong></article>
             <article><span>남은 주간 한도</span><strong id="weeklyRemainingPercent">—</strong></article>
-            <article><span>사용자 활동 대조 구간</span><strong id="weeklyAttributedPercent">—</strong></article>
-            <article><span>사용자 미귀속</span><strong id="weeklyUnattributedPercent">—</strong></article>
+            <article><span>단독 활동 귀속</span><strong id="weeklyAttributedPercent">—</strong></article>
+            <article><span>모델 환산분</span><strong id="weeklyUnattributedPercent">—</strong></article>
           </div>
 <section class="panel explorer-panel" aria-labelledby="weeklyTitle">
   <div class="panel-heading"><div><p class="eyebrow">USER BREAKDOWN · UTC</p><h2 id="weeklyTitle">날짜별 주간 한도 소모</h2></div><span class="legend">주간 제공량 100% 기준</span></div>
   <div class="explorer-toolbar"><span id="weeklyRange"></span><label>날짜 구분 <select id="weeklyDayFilter"><option value="all">전체</option><option value="weekday">주중</option><option value="weekend">주말</option></select></label></div>
-  <div class="explorer-layout"><div class="explorer-main"><div class="interactive-chart"><svg id="weeklyDailyChart" viewBox="0 0 900 300" role="group" aria-label="날짜별 사용자 사용량. 방향키로 날짜 이동, Enter로 선택"></svg><div id="weeklyTooltip" class="chart-tooltip" role="tooltip" hidden></div></div><div id="weeklyLegend" class="chart-legend"></div><p class="chart-help">날짜에 마우스를 올리거나 클릭하세요. Tab·방향키로도 이동할 수 있습니다. 점선은 기록 없음이며 0을 뜻하지 않습니다.</p></div>
-  <aside class="day-inspector" aria-label="선택한 날짜의 사용자별 사용량"><div class="inspector-heading"><div><span class="eyebrow">선택한 범위</span><h3 id="weeklySelectedDate">—</h3></div><label><span class="sr-only">주간 전체 또는 날짜 선택</span><select id="weeklyDateSelect"></select></label></div><div id="weeklyDonut" class="donut-wrap"></div><p id="weeklyDayNote" class="data-note"></p><div class="day-table-wrap"><table class="day-table"><thead><tr><th>사용자 / 서버</th><th>처리 토큰</th><th>관측 구간</th></tr></thead><tbody id="weeklyDayRows"></tbody></table></div></aside></div>
+  <div class="explorer-layout"><div class="explorer-main"><div class="interactive-chart"><svg id="weeklyDailyChart" viewBox="0 0 900 300" role="group" aria-label="날짜별 사용자 사용량. 방향키로 날짜 이동, Enter로 선택"></svg><div id="weeklyTooltip" class="chart-tooltip" role="tooltip" hidden></div></div><div id="weeklyLegend" class="chart-legend"></div></div>
+  <aside class="day-inspector" aria-label="선택한 날짜의 사용자별 사용량"><div class="inspector-heading"><div><span class="eyebrow">선택한 범위</span><h3 id="weeklySelectedDate">—</h3></div><label><span class="sr-only">주간 전체 또는 날짜 선택</span><select id="weeklyDateSelect"></select></label></div><div id="weeklyDonut" class="donut-wrap"></div><p id="weeklyDayNote" class="data-note"></p><div class="day-table-wrap"><table class="day-table"><thead><tr><th>사용자 / 서버</th><th>처리 토큰</th><th>사용률</th></tr></thead><tbody id="weeklyDayRows"></tbody></table></div></aside></div>
   <p id="weeklyCoverageNote" class="data-note panel-note"></p>
 </section>
 <section class="panel chart-panel">
@@ -47,14 +47,14 @@
         </div>
         <div class="weekly-breakdown">
           <div class="weekly-breakdown-heading">
-            <div><h3>사용자별 주간 한도 소모</h3><p id="weeklyBreakdownRange">현재 주기 관측값을 확인하는 중입니다.</p></div>
+            <div><h3>사용자별 주간 한도 소모</h3><p id="weeklyBreakdownRange">집계 중</p></div>
             <span>주간 제공 한도 = 100% · 남은 한도 포함</span>
           </div>
 
           <div class="weekly-stack" id="weeklyBreakdownStack" role="img" aria-label="주간 제공 한도 중 사용자별 소모율과 남은 한도"></div>
           <div class="weekly-breakdown-legend" id="weeklyBreakdownLegend"></div>
           <p class="weekly-breakdown-note" id="weeklyBreakdownNote"></p>
-          <div class="usage-empty" id="weeklyBreakdownEmpty">실제 주간 한도 사용률을 기다리는 중입니다.</div>
+          <div class="usage-empty" id="weeklyBreakdownEmpty">집계 중</div>
         </div>
         <div class="pace-grid">
           <article><span>현재 판정</span><strong id="paceStatus">—</strong><small id="paceDeviation">권장선 계산 중</small></article>
@@ -62,29 +62,29 @@
           <article><span>남은 기간 일일 권장량</span><strong id="remainingDailyBudget">—</strong><small>현재 잔여량 기준</small></article>
           <article><span>초기화 시 예상</span><strong id="projectedUsage">—</strong><small id="projectedDetail">현재 속도 기준</small></article>
         </div>
-        <p class="alert-policy">권장 속도의 150%를 초과하면 관측 기반 한도 소모율이 가장 큰 수집 노드에 알림을 보냅니다. 사용자 귀속 근거가 없으면 특정 사용자에게 경고하지 않습니다.</p>
+
       </section>
 <section class="panel comparison-panel">
         <div class="panel-heading">
-          <div><p class="eyebrow">COLLECTOR COMPARISON</p><h2>사용자별 한도 관측 구간과 요청 내역</h2></div>
-          <div class="legend"><i></i> 관측 구간만 · 개인별 주간 전체 사용률 아님</div>
+          <div><p class="eyebrow">COLLECTOR COMPARISON</p><h2>사용자별 사용량</h2></div>
+          <div class="legend"><i></i> 단독 활동 귀속 + 모델 환산</div>
         </div>
         <div class="comparison-list" id="comparisonList"></div>
-        <div class="usage-empty" id="comparisonEmpty">비교에 필요한 관측 샘플을 수집하는 중입니다.</div>
+        <div class="usage-empty" id="comparisonEmpty">집계 중</div>
       </section>
 <section class="panel model-usage-panel" aria-labelledby="modelUsageTitle">
   <div class="panel-heading"><div><p class="eyebrow">PROJECT · MODEL · TOKENS</p><h2 id="modelUsageTitle">프로젝트 · 모델별 사용 내역</h2></div></div>
   <div class="explorer-toolbar"><label>기간 <select id="modelUsageScope"><option value="weekly">현재 주간 주기</option><option value="recovered">최근 14일 복구 내역</option></select></label><label>사용자 <select id="modelUsageNode"><option value="all">전체 사용자</option></select></label></div>
   <p id="modelUsageRange" class="data-note panel-note"></p>
-  <div class="period-metrics"><article><span>요청 로그의 처리 토큰</span><strong id="modelUsageTokens">—</strong></article><article><span>Standard 기준 환산 크레딧</span><strong id="modelUsageCredits">—</strong><small>공개 단가 적용 · 실제 청구량과 별도</small></article><article><span>환산에서 제외한 토큰</span><strong id="modelUsageUnpriced">—</strong><small>단가 또는 세부 토큰 미확인</small></article></div>
-  <div class="table-wrap model-usage-scroll"><table><thead><tr><th>사용자 / 서버</th><th>프로젝트</th><th>요청 모델 / 추론 / 속도</th><th>전체 토큰</th><th>비캐시 입력</th><th>캐시 입력</th><th>출력</th><th>환산 크레딧</th></tr></thead><tbody id="modelUsageRows"></tbody></table></div>
-  <p id="modelUsageEmpty" class="data-note panel-note">선택한 기간에 복구된 요청 상세가 없습니다. 다른 기간을 선택하거나 수집 상태를 확인하세요.</p>
+  <div class="period-metrics"><article><span>요청 로그의 처리 토큰</span><strong id="modelUsageTokens">—</strong></article><article><span>Standard 기준 환산 크레딧</span><strong id="modelUsageCredits">—</strong><small>Standard 단가</small></article><article><span>환산에서 제외한 토큰</span><strong id="modelUsageUnpriced">—</strong><small>미환산</small></article></div>
+  <div class="table-wrap model-usage-scroll"><table><thead><tr><th>사용자 / 서버</th><th>프로젝트</th><th>요청 모델 / 추론 / 속도</th><th>전체 토큰</th><th>비캐시 입력</th><th>캐시 입력</th><th>출력</th><th>환산 크레딧</th><th>한도 환산</th></tr></thead><tbody id="modelUsageRows"></tbody></table></div>
+  <p id="modelUsageEmpty" class="data-note panel-note">로그 없음</p>
   <p id="modelUsageCoverage" class="data-note panel-note"></p>
   <details class="model-rate-card"><summary>모델별 기준표 · 계산식 · 한도 % 환산 조건</summary>
     <p class="data-note">크레딧 / 100만 토큰 · Standard 속도 · 공식 문서 확인 <span id="modelRateVerified">—</span> · <a href="https://learn.chatgpt.com/docs/pricing#token-rates" target="_blank" rel="noopener noreferrer">OpenAI 공식 기준표</a></p>
     <div class="table-wrap"><table><thead><tr><th>모델</th><th>비캐시 입력</th><th>캐시 입력</th><th>출력</th></tr></thead><tbody id="modelRateRows"></tbody></table></div>
-    <p class="data-note">환산 크레딧 = ((입력 − 캐시 입력) × 입력 단가 + 캐시 입력 × 캐시 단가 + 출력 × 출력 단가) ÷ 1,000,000. 추론 출력은 출력에 포함되어 다시 더하지 않습니다. 추론 강도에 임의 배수를 붙이지 않습니다. 실제 속도가 미기록이어도 이 열은 Standard 기준으로 비교합니다.</p>
-    <p class="data-note">기본 한도 대비 %를 구하려면 기본 한도용 차감 규칙과 플랜 100%에 해당하는 총량이 필요합니다. 공식 크레딧 표는 추가 크레딧·크레딧 요금제용이며 기본 구독 한도를 결정하지 않습니다. Fast도 기본 한도 2.5배와 유료 크레딧 2배로 다릅니다. 따라서 환산 크레딧 비중에 계정 사용률을 곱하지 않습니다. <a href="https://learn.chatgpt.com/docs/agent-configuration/speed" target="_blank" rel="noopener noreferrer">공식 속도별 기준</a></p>
+    <p class="data-note">크레딧 = (비캐시 입력 × 단가 + 캐시 × 단가 + 출력 × 단가) / 1M</p>
+    <p class="data-note">단독 활동 귀속 + 모델 환산 + 미귀속 = 계정 사용률</p>
   </details>
 </section>
 <section class="panel"><div class="panel-heading"><h2>계정 사용 한도</h2><div class="legend" id="usageFreshness"></div></div><div class="rate-limit-grid" id="rateLimitGrid"></div><div class="usage-empty" id="usageEmpty">계정 전체 사용량 수집 대기 중</div></section>
@@ -94,7 +94,7 @@
 <section class="panel explorer-panel" aria-labelledby="monthlyTitle">
   <div class="panel-heading"><div><p class="eyebrow">USER BREAKDOWN · UTC</p><h2 id="monthlyTitle">월별 · 날짜별 사용자 사용량</h2></div><span class="legend">단위: 토큰</span></div>
   <div class="explorer-toolbar"><span id="monthlyRange"></span><label>날짜 구분 <select id="monthlyDayFilter"><option value="all">전체</option><option value="weekday">주중</option><option value="weekend">주말</option></select></label></div>
-  <div class="explorer-layout"><div class="explorer-main"><div class="interactive-chart"><svg id="monthlyDailyChart" viewBox="0 0 900 300" role="group" aria-label="날짜별 사용자 사용량. 방향키로 날짜 이동, Enter로 선택"></svg><div id="monthlyTooltip" class="chart-tooltip" role="tooltip" hidden></div></div><div id="monthlyLegend" class="chart-legend"></div><p class="chart-help">날짜에 마우스를 올리거나 클릭하세요. Tab·방향키로도 이동할 수 있습니다. 점선은 기록 없음이며 0을 뜻하지 않습니다.</p></div>
+  <div class="explorer-layout"><div class="explorer-main"><div class="interactive-chart"><svg id="monthlyDailyChart" viewBox="0 0 900 300" role="group" aria-label="날짜별 사용자 사용량. 방향키로 날짜 이동, Enter로 선택"></svg><div id="monthlyTooltip" class="chart-tooltip" role="tooltip" hidden></div></div><div id="monthlyLegend" class="chart-legend"></div></div>
   <aside class="day-inspector" aria-label="선택한 날짜의 사용자별 사용량"><div class="inspector-heading"><div><span class="eyebrow">선택한 날짜</span><h3 id="monthlySelectedDate">—</h3></div><label><span class="sr-only">날짜 선택</span><select id="monthlyDateSelect"></select></label></div><div id="monthlyDonut" class="donut-wrap"></div><p id="monthlyDayNote" class="data-note"></p><div class="day-table-wrap"><table class="day-table"><thead><tr><th>사용자 / 서버</th><th>토큰</th><th>비중</th></tr></thead><tbody id="monthlyDayRows"></tbody></table></div></aside></div>
   <p id="monthlyCoverageNote" class="data-note panel-note"></p>
 </section>
@@ -178,4 +178,4 @@
         <div class="usage-empty" id="trendEmpty">확인된 세션 사용량이 아직 없습니다. 수집 시작 전 기록이나 미수집 구간은 표시되지 않습니다.</div>
       </section></details></section>
 <footer><span>본문·제목·경로·원본 ID는 수집하지 않습니다.</span><span id="refreshLabel">자동 새로고침</span></footer>
-</main><script src="/usage-view.js?v=20261028-2"></script><script src="/analytics-view.js?v=20261028-2"></script><script src="/accounts-view.js?v=20261028-2"></script><script src="/app.js?v=20261028-2"></script></body></html>
+</main><script src="/usage-view.js?v=20261029-attribution"></script><script src="/analytics-view.js?v=20261029-attribution"></script><script src="/accounts-view.js?v=20261029-attribution"></script><script src="/app.js?v=20261029-attribution"></script></body></html>

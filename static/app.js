@@ -163,93 +163,98 @@ const userQuota = user => user.used_percent;
 const allocatedQuota = quota => quota.attributed_percent;
 const unallocatedQuota = quota => quota.unattributed_percent;
 
+function modelQuotaEstimates(data) {
+  const byNode = new Map();
+  for (const row of data.model_usage?.scopes?.weekly?.rows || []) {
+    if (row.estimated_quota_percent == null) continue;
+    const estimate = byNode.get(row.node_key) || {percent: 0, tokens: 0, methods: new Set()};
+    estimate.percent += row.estimated_quota_percent;
+    estimate.tokens += row.tokens;
+    estimate.methods.add(row.quota_estimation_basis);
+    byNode.set(row.node_key, estimate);
+  }
+  return byNode;
+}
+
 function renderQuotaContract(data) {
   const contract = data.weekly_quota?.account_quota;
   $("quotaPlan").textContent = contract?.plan_code ? `실제 계정 플랜: ${contract.plan_code}` : "플랜 보고 대기";
-  $("quotaCapacityNote").textContent = contract
-    ? "제공 한도는 서비스가 정의한 100%입니다. 현재 계정 응답은 100%에 해당하는 절대 토큰·크레딧량을 제공하지 않습니다."
-    : "계정의 실제 한도 보고를 기다리는 중입니다.";
+  $("quotaCapacityNote").textContent = "주간 한도 100%";
   const available = contract?.recent_changes?.filter(item => item.status !== "insufficient_samples") || [];
   const recent = available[0]?.status === "provider_correction" ? available[0]
     : available.find(item => item.status === "reported_increase") || available[0];
   if (!recent) {
-    $("recentAccountChange").textContent = "사용 전후 관측 대기";
-    $("recentAccountRange").textContent = "서로 다른 시각의 한도 보고가 두 번 이상 필요합니다.";
+    $("recentAccountChange").textContent = "—";
+    $("recentAccountRange").textContent = "";
     return;
   }
   $("recentAccountChange").textContent = recent.status === "provider_correction" ? "제공처 한도값 조정"
-    : recent.status === "reported_unchanged" ? "보고된 계정 사용률 변동 없음"
+    : recent.status === "reported_unchanged" ? "변동 0.0%p"
     : `계정 사용률 +${quotaLabel(recent.change_percent_points)}p`;
   const range = `${new Date(recent.started_at).toLocaleTimeString("ko-KR")} → ${new Date(recent.ended_at).toLocaleTimeString("ko-KR")}`;
-  $("recentAccountRange").textContent = `${range} · 공유 계정 전체의 보고값 변화입니다.${recent.status === "reported_unchanged" ? " 미세 사용이나 보고 지연을 실제 사용량 0으로 판정하지 않습니다." : " 요청별·개인별 차감률은 응답에 포함되지 않습니다."}`;
+  $("recentAccountRange").textContent = range;
 }
 
 function renderWeeklyBreakdown(data) {
-  const quota = data.weekly_quota;
-  $("weeklyBreakdownEmpty").style.display = quota ? "none" : "block";
-  for (const id of ["weeklyUsedPercent", "weeklyRemainingPercent", "weeklyAttributedPercent", "weeklyUnattributedPercent"]) $(id).textContent = "—";
-  $("weeklyBreakdownStack").innerHTML = "";
-  $("weeklyBreakdownLegend").innerHTML = "";
-  $("weeklyBreakdownNote").textContent = "";
-  if (!quota) {
-    $("weeklyBreakdownRange").textContent = "실제 주간 한도 사용률을 기다리는 중입니다.";
-    $("weeklyBreakdownStack").setAttribute("aria-label", "한도 사용률 확인 불가");
+  const q = data.weekly_quota;
+  $("weeklyBreakdownEmpty").style.display = q ? "none" : "block";
+  if (!q) {
+    for (const id of ["weeklyUsedPercent", "weeklyRemainingPercent", "weeklyAttributedPercent", "weeklyUnattributedPercent"]) $(id).textContent = "—";
+    for (const id of ["weeklyBreakdownStack", "weeklyBreakdownLegend"]) $(id).innerHTML = "";
+    $("weeklyBreakdownNote").textContent = "";
     return;
   }
-  $("weeklyUsedPercent").textContent = quotaLabel(quota.used_percent);
-  $("weeklyRemainingPercent").textContent = quotaLabel(quota.remaining_percent);
-  $("weeklyAttributedPercent").textContent = allocatedQuota(quota) === 0 && (quota.user_usage || []).some(user => user.tokens > 0)
-    ? "사용 확인" : quotaLabel(allocatedQuota(quota));
-  $("weeklyUnattributedPercent").textContent = quotaLabel(unallocatedQuota(quota));
+  $("weeklyUsedPercent").textContent = quotaLabel(q.used_percent);
+  $("weeklyRemainingPercent").textContent = quotaLabel(q.remaining_percent);
+  $("weeklyAttributedPercent").textContent = quotaLabel(q.display_observed_percent ?? q.observed_percent ?? q.attributed_percent ?? 0);
+  $("weeklyUnattributedPercent").textContent = quotaLabel(q.display_estimated_percent ?? q.estimated_percent ?? 0);
   const nodes = new Map((data.nodes || []).map(node => [node.key, node]));
   const colors = nodeColorMap(data.nodes || []);
-  const labelFor = key => {
-    const node = nodes.get(key);
-    return node ? `${node.display_name || node.os_user} · ${node.hostname}` : key;
-  };
-  const rows = (quota.user_usage || []).map(user => ({
-    name: labelFor(user.node_key), value: userQuota(user),
-    color: colors.get(user.node_key) || "#849b92", detail: `${number.format(user.tokens)} 토큰 · ${user.attribution_reason || "관측 구간만 · 주간 전체 사용량 아님"}`,
-  }));
-  rows.push({ name: "사용자 미귀속", value: unallocatedQuota(quota), color: "var(--amber)", detail: "개인에게 임의 배분하지 않은 계정 사용분" });
-  rows.push({ name: "남은 한도", value: quota.remaining_percent, color: "#3d4855", detail: "주간 제공량 기준" });
-  $("weeklyBreakdownRange").textContent = quota.coverage_started_at
-    ? `${new Date(quota.coverage_started_at).toLocaleString("ko-KR")}부터 관측 · 계정 실제 사용 ${quotaLabel(quota.used_percent)}`
-    : `계정 실제 사용 ${quotaLabel(quota.used_percent)} · 사용자별 귀속 관측 대기`;
-  $("weeklyBreakdownStack").innerHTML = rows.filter(row => row.value > 0).map(row =>
-    `<span style="width:${row.value.toFixed(4)}%;background:${row.color}" title="${escapeHtml(row.name)}: ${quotaLabel(row.value)}"></span>`
-  ).join("");
-  $("weeklyBreakdownStack").setAttribute("aria-label", `주간 제공량 100% 중 사용 ${quotaLabel(quota.used_percent)}, 남음 ${quotaLabel(quota.remaining_percent)}, 사용자 미귀속 ${quotaLabel(unallocatedQuota(quota))}`);
-  $("weeklyBreakdownLegend").innerHTML = rows.map(row => `<span><i style="background:${row.color}"></i><span class="weekly-share-name">${escapeHtml(row.name)}</span><strong>${row.value == null ? "사용 확인" : quotaLabel(row.value)}</strong><small>${escapeHtml(row.detail)}</small></span>`).join("");
-  $("weeklyBreakdownNote").textContent = `계정 실제 사용률은 ${quotaLabel(quota.used_percent)}입니다. 서비스가 제공하는 한도 사용률은 공유 계정 전체 값입니다. 사용자별 숫자는 단독 활동과 한도 증가가 일치한 관측 구간만 표시하며, 해당 사용자의 실제 주간 전체 사용률을 뜻하지 않습니다. 나머지는 사용자 미귀속으로 남깁니다. 토큰 수·계정 평균·다른 모델의 소모율로 개인별 사용률을 만들어 내지 않습니다. 요청별 모델·추론 강도·캐시·출력 내역은 아래 로그 상세에서 확인할 수 있습니다.`;
-
+  const rows = (q.user_usage || []).map(user => {
+    const node = nodes.get(user.node_key) || {};
+    return {name: node.display_name || node.os_user || user.node_key,
+      value: user.display_used_percent ?? user.used_percent, color: colors.get(user.node_key) || "#849b92",
+      detail: `단독 활동 귀속 ${quotaLabel(user.display_observed_percent ?? user.observed_used_percent ?? 0)} · 모델 환산 ${quotaLabel(user.display_estimated_percent ?? user.estimated_used_percent ?? 0)}`};
+  });
+  if (q.unattributed_percent > 0) rows.push({name: "미귀속", value: q.display_unattributed_percent ?? q.unattributed_percent, color: "var(--amber)", detail: "계정 잔여분"});
+  rows.push({name: "잔여 한도", value: q.remaining_percent, color: "#3d4855", detail: ""});
+  $("weeklyBreakdownRange").textContent = q.resets_at ? `초기화 ${new Date(q.resets_at).toLocaleString("ko-KR")}` : "";
+  $("weeklyBreakdownStack").innerHTML = rows.filter(row => row.value > 0).map(row => `<span style="width:${row.value}%;background:${row.color}" title="${escapeHtml(row.name)} ${quotaLabel(row.value)}"></span>`).join("");
+  $("weeklyBreakdownLegend").innerHTML = rows.map(row => `<span><i style="background:${row.color}"></i><span class="weekly-share-name">${escapeHtml(row.name)}</span><strong>${quotaLabel(row.value)}</strong><small>${escapeHtml(row.detail)}</small></span>`).join("");
+  $("weeklyBreakdownNote").textContent = q.over_estimated_percent > 0
+    ? `환산 초과 ${quotaLabel(q.over_estimated_percent)}`
+    : q.credits_per_percent_point ? `1% ≈ ${number.format(q.credits_per_percent_point)} 참조 크레딧` : "";
 }
 
 function renderUsageEvidence(item) {
   const evidence = item.evidence;
   const metadata = item.metadata;
-  const installation = metadata.kind === "windows-machine" ? "Windows 관리자 설치" : metadata.kind === "user" ? "사용자 설치" : "설치 방식 보고 대기";
-  const status = metadata.backfill_pending > 0 ? "기존 로그 복구 중" : evidence.length ? "복구된 요청별 기록" : metadata.version === "0.7.1" ? "해당 계정으로 확인된 요청 기록 대기" : "수집기 0.7.1 업데이트 대기";
+  const installation = metadata.kind === "windows-machine" ? "Windows 관리자 설치" : metadata.kind === "user" ? "사용자 설치" : "—";
+  const status = metadata.backfill_pending > 0 ? "복구 중" : evidence.length ? "요청 로그" : metadata.version === "0.7.1" ? "수집 중" : "수집기 0.7.1 업데이트 대기";
   const count = value => value == null ? "기록 없음" : number.format(value);
-  return `<details class="usage-evidence"><summary>모델·추론·캐시 내역 · ${status}</summary><p>보고된 수집기: ${escapeHtml(metadata.version || "미보고")} · ${installation}</p>${evidence.length ? `<div class="table-wrap"><table><thead><tr><th>요청 모델 / 속도</th><th>추론 강도</th><th>입력</th><th>캐시 입력</th><th>출력</th><th>추론 (출력에 포함)</th></tr></thead><tbody>${evidence.map(row => `<tr><td>${escapeHtml(row.model)}<small>${escapeHtml(row.service_tier)} / ${escapeHtml(row.reasoning_mode)}</small></td><td>${escapeHtml(row.effort)}</td><td>${count(row.input_tokens)}</td><td>${count(row.cached_input_tokens)}</td><td>${count(row.output_tokens)}</td><td>${count(row.reasoning_output_tokens)}</td></tr>`).join("")}</tbody></table></div>` : "<p>로컬 로그와 계정 사용 구간을 대조해 복구합니다. 수집 전·계정 전환 내역을 검증할 수 없는 기록은 다른 계정에 붙이지 않습니다.</p>"}</details>`;
+  return `<details class="usage-evidence"><summary>모델·추론·캐시 내역 · ${status}</summary><p>보고된 수집기: ${escapeHtml(metadata.version || "미보고")} · ${installation}</p>${evidence.length ? `<div class="table-wrap"><table><thead><tr><th>요청 모델 / 속도</th><th>추론 강도</th><th>입력</th><th>캐시 입력</th><th>출력</th><th>추론 (출력에 포함)</th></tr></thead><tbody>${evidence.map(row => `<tr><td>${escapeHtml(row.model)}<small>${escapeHtml(row.service_tier)} / ${escapeHtml(row.reasoning_mode)}</small></td><td>${escapeHtml(row.effort)}</td><td>${count(row.input_tokens)}</td><td>${count(row.cached_input_tokens)}</td><td>${count(row.output_tokens)}</td><td>${count(row.reasoning_output_tokens)}</td></tr>`).join("")}</tbody></table></div>` : "<p>로그 없음</p>"}</details>`;
 }
 
 function renderComparison(data) {
-  const quota = data.weekly_quota;
-  $("comparisonEmpty").style.display = quota ? "none" : "block";
-  if (!quota) { $("comparisonList").innerHTML = ""; return; }
+  const q = data.weekly_quota;
+  $("comparisonEmpty").style.display = q ? "none" : "block";
+  if (!q) { $("comparisonList").innerHTML = ""; return; }
   const nodes = new Map((data.nodes || []).map(node => [node.key, node]));
-  const rows = (quota.user_usage || []).map(user => {
+  const rows = (q.user_usage || []).map(user => {
     const node = nodes.get(user.node_key) || {};
-    return { name: node.display_name || node.os_user || user.node_key, detail: node.hostname || "", value: userQuota(user), tokens: user.tokens,
-      reason: user.attribution_reason || "관측 구간만 · 주간 전체 사용량 아님", evidence: user.usage_details || [], metadata: user.collector_metadata || {} };
+    return {name: node.display_name || node.os_user || user.node_key,
+      detail: node.hostname || "", value: user.display_used_percent ?? user.used_percent, tokens: user.tokens,
+      unpricedTokens: user.reference_unpriced_tokens || 0,
+      credits: user.standard_reference_credits, observed: user.display_observed_percent ?? user.observed_used_percent ?? user.used_percent ?? 0,
+      estimated: user.used_percent == null ? 0 : user.display_estimated_percent ?? user.estimated_used_percent ?? 0,
+      evidence: user.usage_details || [], metadata: user.collector_metadata || {}};
   });
-  rows.push({ name: "사용자 미귀속", detail: "개인에게 임의 배분하지 않은 계정 사용분", value: unallocatedQuota(quota), untracked: true });
+  if (q.unattributed_percent > 0) rows.push({name: "미귀속", value: q.display_unattributed_percent ?? q.unattributed_percent, untracked: true});
   $("comparisonList").innerHTML = rows.map(item => `<article class="comparison-row">
-    <div class="comparison-user"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.detail)}</small></div>
-    <div class="comparison-meter">${item.value == null ? '<div class="usage-known">사용 기록 있음 · 한도 비율 미확정</div>' : `<div><i style="width:${item.value}%;${item.untracked ? "background:var(--amber)" : ""}"></i></div>`}<small>${escapeHtml(item.reason || "동시 사용·관측 전 내역은 미귀속으로 유지")}</small></div>
-    <div class="comparison-value"><strong>${item.value == null ? "사용 확인" : quotaLabel(item.value)}</strong><small>${item.tokens == null ? "사용자 귀속 불가" : `${number.format(item.tokens)} 토큰 · 처리량 참고`}</small></div>
-    <span class="comparison-status normal">${item.untracked ? "미귀속" : item.value == null ? "한도 비율 미확정" : "관측 구간만"}</span>
+    <div class="comparison-user"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.detail || "")}</small></div>
+    <div class="comparison-meter"><div><i style="width:${Math.min(100, item.value || 0)}%"></i></div><small>${item.untracked ? "계정 잔여분" : `단독 활동 귀속 ${quotaLabel(item.observed)} · 모델 환산 ${quotaLabel(item.estimated)}`}</small></div>
+    <div class="comparison-value"><strong>${quotaLabel(item.value)}</strong><small>${item.tokens == null ? "로그 없음" : `${number.format(item.tokens)} 토큰${item.credits != null ? ` · ${number.format(item.credits)} 크레딧` : ""}`}</small>${item.unpricedTokens ? `<small>미환산 ${number.format(item.unpricedTokens)} 토큰</small>` : ""}</div>
+    <span class="comparison-status normal">${item.untracked ? "미귀속" : item.estimated > 0 ? "모델 환산" : item.value == null ? "자료 없음" : "단독 활동 귀속"}</span>
     ${item.untracked ? "" : renderUsageEvidence(item)}
   </article>`).join("");
 }
@@ -483,7 +488,9 @@ function renderModelUsage(data) {
   const unpriced = rows.reduce((sum, row) => sum + row.reference_unpriced_tokens, 0);
   const priced = rows.filter(row => row.standard_reference_credits != null);
   const creditFormat = new Intl.NumberFormat("ko-KR", {minimumFractionDigits: 2, maximumFractionDigits: 4});
+  const percentFormat = new Intl.NumberFormat("ko-KR", {minimumFractionDigits: 1, maximumFractionDigits: 1});
   const creditLabel = value => value > 0 && value < 0.0001 ? "<0.0001" : creditFormat.format(value);
+  const quotaLabel = value => value == null ? "—" : `${percentFormat.format(value)}%`;
   $("modelUsageTokens").textContent = number.format(tokens);
   $("modelUsageCredits").textContent = priced.length ? creditLabel(priced.reduce((sum, row) => sum + row.standard_reference_credits, 0)) : "—";
   $("modelUsageUnpriced").textContent = number.format(unpriced);
@@ -495,10 +502,17 @@ function renderModelUsage(data) {
     const cost = row.standard_reference_credits == null
       ? (row.reference_missing_reasons?.model_rate_unpublished != null ? "공개 단가 없음" : "세부 토큰 미확인")
       : creditLabel(row.standard_reference_credits) + (row.reference_status === "partial" ? " · 일부" : "");
-    return `<tr><td>${escapeHtml(nodeName(row.node_key))}</td><td>${escapeHtml(row.project_name || "프로젝트 기록 없음")}</td><td>${escapeHtml(row.model)}<small>추론 ${escapeHtml(row.effort)} · 속도 ${escapeHtml(row.service_tier)}</small></td><td class="tokens">${number.format(row.tokens)}</td><td>${uncached}</td><td>${count("cached_input_tokens")}</td><td>${count("output_tokens")}<small>추론 포함 ${count("reasoning_output_tokens")}</small></td><td>${cost}</td></tr>`;
+    const basis = row.quota_estimation_basis === "calibrated_model_credits" ? "구간 보정" : row.quota_estimation_basis === "direct_model_observation" ? "단독 모델 구간" : row.quota_estimation_basis === "standard_rate_extrapolation" ? "단가 외삽" : "자료 없음";
+    const band = row.estimated_quota_percent_range;
+    const quotaBand = band ? `중앙 50% ${quotaLabel(band.low)}–${quotaLabel(band.high)}` : basis;
+    const quotaEstimate = row.estimated_quota_percent == null ? "—" : `${quotaLabel(row.display_estimated_quota_percent ?? row.estimated_quota_percent)}<small>${quotaBand}</small>`;
+    const tokensPerPoint = row.tokens_per_quota_percent_point == null ? "—" : `1%당 약 ${number.format(Math.round(row.tokens_per_quota_percent_point))} 토큰`;
+    return `<tr><td>${escapeHtml(nodeName(row.node_key))}</td><td>${escapeHtml(row.project_name || "프로젝트 기록 없음")}</td><td>${escapeHtml(row.model)}<small>추론 ${escapeHtml(row.effort)} · 속도 ${escapeHtml(row.service_tier)}</small></td><td class="tokens">${number.format(row.tokens)}</td><td>${uncached}</td><td>${count("cached_input_tokens")}</td><td>${count("output_tokens")}<small>추론 포함 ${count("reasoning_output_tokens")}</small></td><td>${cost}</td><td>${quotaEstimate}<small>${tokensPerPoint}</small></td></tr>`;
   }).join("");
   $("modelUsageEmpty").hidden = rows.length > 0;
-  $("modelUsageCoverage").textContent = `${number.format(tokens)} 토큰의 모델별 요청 내역 · Standard 기준 환산 · 단가 또는 세부 토큰이 없는 ${number.format(unpriced)} 토큰은 환산 합계에서 제외합니다. 이 표는 수집된 로그 범위이며 계정 전체 사용량과 다를 수 있습니다.`;
+  const calibration = usage?.quota_conversion?.calibration;
+  const directRates = usage?.quota_conversion?.direct_model_rates || [];
+  $("modelUsageCoverage").textContent = `모델 ${number.format(tokens)} 토큰 · 미환산 ${number.format(unpriced)} 토큰`;
   $("modelRateRows").innerHTML = (usage?.rate_card?.rates || []).map(rate => `<tr><td>${escapeHtml(rate.model)}</td><td>${rate.input}</td><td>${rate.cached_input}</td><td>${rate.output}</td></tr>`).join("");
   $("modelRateVerified").textContent = usage?.rate_card?.verified_at || "—";
 }

@@ -11,6 +11,117 @@ from datetime import datetime, timezone
 from usage_aggregation import UsageWindow, utc_iso
 
 
+def reconcile_quota_usage(quota, model_usage, db=None, account_key=None):
+    """Retain unallocated usage; model estimates never expand to fill the account meter."""
+    if not quota:
+        return
+    rows = model_usage.get("scopes", {}).get("weekly", {}).get("rows", [])
+    weights = {}
+    credits_by_node = {}
+    tokens_by_node = {}
+    unpriced_by_node = {}
+    for row in rows:
+        node = row["node_key"]
+        tokens_by_node[node] = tokens_by_node.get(node, 0) + row["tokens"]
+        unpriced_by_node[node] = unpriced_by_node.get(node, 0) + row.get("reference_unpriced_tokens", 0)
+        if row.get("standard_reference_credits") is not None:
+            credits_by_node[row["node_key"]] = credits_by_node.get(row["node_key"], 0) + row["standard_reference_credits"]
+        amount = row.get("estimated_quota_percent")
+        if amount is not None and amount > 0:
+            weights[row["node_key"]] = weights.get(row["node_key"], 0) + amount
+    users = {row["node_key"]: row for row in quota["user_usage"]}
+    for node in weights.keys() - users.keys():
+        user = {"node_key": node, "tokens": sum(r["tokens"] for r in rows if r["node_key"] == node),
+                "used_percent": None, "observed_used_percent": None}
+        quota["user_usage"].append(user)
+        users[node] = user
+    observed = sum(user.get("observed_used_percent") or 0 for user in users.values())
+    weights = {node: max(0.0, value - (users[node].get("observed_used_percent") or 0))
+               for node, value in weights.items()}
+    for node, user in users.items():
+        direct = user.get("observed_used_percent") or 0.0
+        estimate = weights.get(node, 0)
+        user.update(estimated_used_percent=estimate,
+                    counter_based_tokens=user.get("tokens"),
+                    tokens=tokens_by_node.get(node),
+                    token_basis="weekly_request_details",
+                    reference_unpriced_tokens=unpriced_by_node.get(node, 0),
+                    standard_reference_credits=credits_by_node.get(node),
+                    model_estimated_used_percent=weights.get(node, 0) + direct,
+                    used_percent=direct + estimate if direct or node in weights else None,
+                    quota_status="estimated" if estimate else "observed" if direct else "unallocated",
+                    attribution_reason="관측" if direct and not estimate else "모델 추정")
+    quota["observed_percent"] = observed
+    quota["estimated_percent"] = sum(user["estimated_used_percent"] for user in users.values())
+    quota["attributed_percent"] = sum(user.get("used_percent") or 0 for user in users.values())
+    quota["unattributed_percent"] = max(0.0, quota["used_percent"] - quota["attributed_percent"])
+    quota["over_estimated_percent"] = max(0.0, quota["attributed_percent"] - quota["used_percent"])
+    quota["credits_per_percent_point"] = ((model_usage.get("quota_conversion", {}).get("calibration") or {})
+                                          .get("credits_per_percent_point"))
+    quota["allocation_basis"] = "observed_plus_calibrated_estimates_with_unallocated_remainder"
+    # Largest-remainder rounding makes displayed tenths add to the account total.
+    import math
+    parts = []
+    for node, user in users.items():
+        parts.extend([(node, "observed", user.get("observed_used_percent") or 0),
+                      (node, "estimated", user["estimated_used_percent"])])
+    parts.append((None, "unallocated", quota["unattributed_percent"]))
+    units = [math.floor(value * 10) for _, _, value in parts]
+    extra = round((quota["used_percent"] + quota["over_estimated_percent"]) * 10) - sum(units)
+    for index in sorted(range(len(parts)), key=lambda i: parts[i][2] * 10 - units[i], reverse=True)[:max(0, extra)]:
+        units[index] += 1
+    for (node, kind, _), value in zip(parts, units):
+        if node is None:
+            quota["display_unattributed_percent"] = value / 10
+        else:
+            users[node]["display_" + kind + "_percent"] = value / 10
+    for user in users.values():
+        user["display_used_percent"] = (user["display_observed_percent"] + user["display_estimated_percent"]
+                                         if user["used_percent"] is not None else None)
+    quota["display_observed_percent"] = sum(user["display_observed_percent"] for user in users.values())
+    quota["display_estimated_percent"] = sum(user["display_estimated_percent"] for user in users.values())
+    for node, user in users.items():
+        node_rows = [row for row in rows if row["node_key"] == node and row.get("estimated_quota_percent") is not None]
+        model_units = [math.floor(row["estimated_quota_percent"] * 10) for row in node_rows]
+        extra = round(sum(row["estimated_quota_percent"] for row in node_rows) * 10) - sum(model_units)
+        for index in sorted(range(len(node_rows)), key=lambda i: node_rows[i]["estimated_quota_percent"] * 10 - model_units[i], reverse=True)[:max(0, extra)]:
+            model_units[index] += 1
+        if extra < 0:
+            for index in sorted(range(len(node_rows)), key=lambda i: model_units[i], reverse=True):
+                reduction = min(model_units[index], -extra)
+                model_units[index] -= reduction
+                extra += reduction
+                if extra == 0:
+                    break
+        for row, value in zip(node_rows, model_units):
+            row["display_estimated_quota_percent"] = value / 10
+    if db is not None and quota.get("window_started_at"):
+        from model_usage import standard_reference
+        start = int(datetime.fromisoformat(quota["window_started_at"].replace("Z", "+00:00")).timestamp())
+        daily_weights = {}
+        for raw in db.execute("SELECT * FROM collector_usage_details WHERE account_key=? AND bucket_at>=?", (account_key, start)):
+            detail = dict(raw)
+            credit, _ = standard_reference(detail)
+            if credit is not None and credit > 0:
+                day = datetime.fromtimestamp(detail["bucket_at"], timezone.utc).date().isoformat()
+                weights_for_day = daily_weights.setdefault(day, {})
+                weights_for_day[detail["node_key"]] = weights_for_day.get(detail["node_key"], 0) + credit
+        for date, day in quota.get("days", {}).items():
+            weights_for_day = daily_weights.get(date, {})
+            total_weight = sum(weights_for_day.values())
+            day["observed_users"] = dict(day["users"])
+            day["estimated_users"] = {}
+            calibration = model_usage.get("quota_conversion", {}).get("calibration") or {}
+            rate = calibration.get("credits_per_percent_point")
+            if total_weight and rate:
+                for node, weight in weights_for_day.items():
+                    amount = max(0.0, weight / rate - day["observed_users"].get(node, 0))
+                    day["estimated_users"][node] = amount
+                    day["users"][node] = day["users"].get(node, 0) + amount
+            day["unattributed_percent"] = max(0.0, day["used_percent"] - sum(day["users"].values()))
+            day["over_estimated_percent"] = max(0.0, sum(day["users"].values()) - day["used_percent"])
+
+
 def account_quota_contract(account_usage, weekly, samples, now):
     """Expose exactly what the authenticated provider reports, without a guessed denominator."""
     limit = next((item for item in (account_usage or {}).get("rate_limits", [])

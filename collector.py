@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_LOG_BACKUPS = 3
 APP_SERVER_TIMEOUT_SECONDS = 15
-COLLECTOR_VERSION = "0.7.1"
+COLLECTOR_VERSION = "0.7.5"
 UPDATE_FILE_NAMES = {"collector.py", "collector_windows_machine.py"}
 
 
@@ -77,23 +77,179 @@ def read_account(auth_file: Path, token: str) -> dict[str, Any]:
         return {"key": "unknown", "name": "Unknown", "email": None, "plan": None}
 
 
+def _usage_counts(raw):
+    """Canonical token components. Cache is part of input; reasoning is part of output."""
+    if not isinstance(raw, dict):
+        return None
+    fields = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
+    result = {key: _optional_nonnegative_int(raw.get(key)) for key in fields}
+    for field, nested, key in (("cached_input_tokens", "input_tokens_details", "cached_tokens"),
+                                ("reasoning_output_tokens", "output_tokens_details", "reasoning_tokens")):
+        if result[field] is None and isinstance(raw.get(nested), dict):
+            result[field] = _optional_nonnegative_int(raw[nested].get(key))
+    if result["total_tokens"] is None and result["input_tokens"] is not None and result["output_tokens"] is not None:
+        result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
+    return result if result["total_tokens"] is not None else None
+
+
+def _execution_settings(context, settings, new_turn=False):
+    if not isinstance(settings, dict):
+        return
+    if new_turn:
+        for key in ("model", "effort", "reasoning_mode"):
+            context.pop(key, None)
+    model = settings.get("model")
+    if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", model):
+        context["model"] = model
+    for field, choices in (("effort", {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}),
+                           ("reasoning_mode", {"standard", "pro"})):
+        value = settings.get(field, settings.get("reasoning_effort") if field == "effort" else None)
+        if value is not None:
+            context.pop(field, None)
+            if isinstance(value, str) and value in choices:
+                context[field] = value
+    if "service_tier" in settings:
+        context.pop("service_tier", None)
+        tier = settings["service_tier"]
+        normalized = {"default": "standard", "standard": "standard", "priority": "fast",
+                      "fast": "fast", "flex": "flex"}.get(tier) if isinstance(tier, str) else None
+        if normalized:
+            context["service_tier"] = normalized
+
+
+def _fork_replay_boundary(path, metadata):
+    """Match an explicit fork's leading counters to its local parent's history."""
+    parent_id = metadata.get("forked_from_id")
+    if not parent_id:
+        source = metadata.get("source")
+        try:
+            parent_id = source["subagent"]["thread_spawn"]["parent_thread_id"]
+        except (KeyError, TypeError):
+            return 0, []
+    if not isinstance(parent_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", parent_id):
+        return 0, []
+    home = next((p.parent for p in path.parents if p.name in {"sessions", "archived_sessions"}), None)
+    if home is None:
+        return 0, []
+    parent = next((p for folder in (home / "sessions", home / "archived_sessions")
+                   if folder.is_dir() for p in folder.rglob(f"*{parent_id}*.jsonl") if p != path), None)
+    if parent is None:
+        return 0, []
+    def counters(file, before=None):
+        with file.open("rb") as stream:
+            while True:
+                start = stream.tell()
+                line = stream.readline()
+                if not line:
+                    break
+                try:
+                    item = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(item, dict) or not isinstance(item.get("payload"), dict):
+                    continue
+                payload = item["payload"]
+                if before and isinstance(item.get("timestamp"), str):
+                    try:
+                        if datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00")) > before:
+                            continue
+                    except (ValueError, TypeError):
+                        continue
+                if item.get("type") == "event_msg" and payload.get("type") == "token_count":
+                    info = payload.get("info")
+                    if isinstance(info, dict):
+                        counts = _usage_counts(info.get("last_token_usage")) or _usage_counts(info.get("total_token_usage"))
+                        if counts:
+                            yield start, stream.tell(), counts
+    boundary = 0
+    try:
+        before = datetime.fromisoformat(metadata["_fork_at"].replace("Z", "+00:00"))
+    except (KeyError, ValueError, AttributeError):
+        before = None
+    parent_rows = counters(parent, before)
+    child_rows = counters(path)
+    try:
+        for (_, child_end, child_usage), (_, _, parent_usage) in zip(child_rows, parent_rows):
+            if child_usage != parent_usage:
+                break
+            boundary = child_end + 1
+    finally:
+        parent_rows.close()
+        child_rows.close()
+    compactions = []
+    with parent.open("rb") as stream:
+        for line in stream:
+            try:
+                item = json.loads(line)
+                if not isinstance(item, dict) or item.get("type") != "token_usage_record":
+                    continue
+                if before and isinstance(item.get("timestamp"), str) and datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00")) > before:
+                    continue
+                response_id = item.get("payload", {}).get("response_id")
+                if isinstance(response_id, str):
+                    compactions.append(hashlib.sha256(response_id.encode()).hexdigest())
+            except (ValueError, TypeError, AttributeError):
+                continue
+    return boundary, compactions
+
+
 def _read_rollout_usage_buckets(
     rollout_path: Any, cutoff: int, offset: int, previous_total: int | None = None,
-    details: list[dict[str, Any]] | None = None, context: dict[str, str] | None = None,
+    details: list[dict[str, Any]] | None = None, context: dict | None = None,
     stop_offset: int | None = None, max_bytes: int | None = None,
 ) -> tuple[list[dict[str, int]], int, int | None]:
-    if not rollout_path:
+    if not rollout_path or not Path(str(rollout_path)).is_file():
         return [], offset, previous_total
     path = Path(str(rollout_path))
-    if not path.is_file():
-        return [], offset, previous_total
-    buckets: dict[int, int] = {}
     context = context if context is not None else {}
+    buckets = {}
     initial_total = previous_total
+
+    def emit(usage, timestamp, settings):
+        if not usage or not usage.get("total_tokens") or not isinstance(timestamp, str):
+            return
+        try:
+            at = int(datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp())
+        except (ValueError, OverflowError):
+            return
+        if at < cutoff:
+            return
+        at -= at % 60
+        tokens = usage["total_tokens"]
+        buckets[at] = buckets.get(at, 0) + tokens
+        if details is not None:
+            details.append({"at": at, "tokens": tokens, "events": 1,
+                            **{key: usage.get(key) for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")},
+                            **{key: settings.get(key, "unknown") for key in ("model", "effort", "service_tier", "reasoning_mode")}})
+
     try:
         size = path.stat().st_size
         if offset < 0 or offset > size:
-            offset = 0
+            offset, previous_total = 0, None
+            context.clear()
+        if offset == 0 and "_replay_boundary" not in context:
+            # Decide from actual markers, including markers AFTER a long copied prefix.
+            # Store only a byte boundary, never session content or parent prompts.
+            context["_replay_boundary"] = 0
+            metadata = {}
+            with path.open("rb") as probe:
+                while line := probe.readline():
+                    try:
+                        item = json.loads(line)
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    if not isinstance(item, dict) or not isinstance(item.get("payload"), dict) or not isinstance(item.get("type"), str):
+                        continue
+                    payload = item["payload"]
+                    if item.get("type") == "session_meta" and not metadata:
+                        metadata = {**payload, "_fork_at": item.get("timestamp")}
+                    if ((item.get("type") == "event_msg" and payload.get("type") == "task_started")
+                            or (item.get("type") in {"inter_agent_communication_metadata", "inter_agent_communication"}
+                                and payload.get("trigger_turn") is True)):
+                        context["_replay_boundary"] = probe.tell()
+                        break
+            if not context["_replay_boundary"] and metadata:
+                context["_replay_boundary"], context["_parent_compactions"] = _fork_replay_boundary(path, metadata)
         with path.open("rb") as stream:
             stream.seek(offset)
             while True:
@@ -110,66 +266,106 @@ def _read_rollout_usage_buckets(
                     break
                 try:
                     event = json.loads(line)
-                except (UnicodeDecodeError, json.JSONDecodeError):
+                except (ValueError, UnicodeDecodeError):
                     continue
-                if not isinstance(event, dict):
+                if not isinstance(event, dict) or not isinstance(event.get("payload"), dict) or not isinstance(event.get("type"), str):
                     continue
-                payload = event.get("payload")
-                if event.get("type") == "turn_context" and isinstance(payload, dict):
-                    # Only whitelisted execution metadata, never instructions,
-                    # paths, approval policies, or other turn context contents.
-                    model = payload.get("model")
-                    context.clear()
-                    if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", model):
-                        context["model"] = model
-                    for field, choices in (
-                        ("effort", {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}),
-                        ("service_tier", {"auto", "default", "standard", "priority", "fast", "ultrafast", "flex"}),
-                        ("reasoning_mode", {"standard", "pro"}),
-                    ):
-                        value = payload.get(field, payload.get("reasoning_effort") if field == "effort" else None)
-                        if isinstance(value, str) and value in choices:
-                            context[field] = value
+                payload, kind = event["payload"], event.get("type")
+                replay = stream.tell() < context.get("_replay_boundary", 0)
+                if kind == "turn_context":
+                    context["_turn"] = context.get("_turn", 0) + 1
+                    _execution_settings(context, payload, new_turn=True)
                     continue
-                if event.get("type") != "event_msg" or not isinstance(payload, dict):
+                if kind == "event_msg" and payload.get("type") == "thread_settings_applied":
+                    _execution_settings(context, payload.get("thread_settings"))
                     continue
-                if payload.get("type") != "token_count":
+                if kind in {"token_usage_record", "compacted"}:
+                    response_id = payload.get("response_id" if kind == "token_usage_record" else "compaction_response_id")
+                    if not isinstance(response_id, str):
+                        continue
+                    key = hashlib.sha256(response_id.encode()).hexdigest()
+                    pending = context.setdefault("_compactions", {})
+                    record = pending.setdefault(key, {})
+                    if kind == "compacted":
+                        record["matched"] = True
+                    else:
+                        usage = _usage_counts(payload.get("usage"))
+                        if usage and "usage" not in record:
+                            try:
+                                request_at = datetime.fromisoformat(str(event.get("timestamp")).replace("Z", "+00:00")).isoformat()
+                            except ValueError:
+                                request_at = None
+                            record.update(usage=usage, timestamp=request_at,
+                                          turn=context.get("_turn", 0),
+                                          settings={k: context[k] for k in ("model", "effort", "service_tier", "reasoning_mode") if k in context},
+                                          thread_total=_usage_counts(payload.get("thread_token_usage")))
+                            _execution_settings(record["settings"], payload)
+                    if replay or key in context.get("_parent_compactions", []):
+                        record["covered"] = True
+                    continue
+                if kind != "event_msg" or payload.get("type") != "token_count":
                     continue
                 info = payload.get("info")
-                usage = info.get("last_token_usage") if isinstance(info, dict) else None
-                tokens = _optional_nonnegative_int(usage.get("total_tokens")) if isinstance(usage, dict) else None
-                total_usage = info.get("total_token_usage") if isinstance(info, dict) else None
-                total = _optional_nonnegative_int(total_usage.get("total_tokens")) if isinstance(total_usage, dict) else None
-                repeated = total is not None and total == previous_total
+                if not isinstance(info, dict):
+                    continue
+                total_usage = _usage_counts(info.get("total_token_usage"))
+                last = _usage_counts(info.get("last_token_usage"))
+                total = total_usage["total_tokens"] if total_usage else None
+                before = context.get("_totals")
+                old_total = previous_total
+                duplicate = total is not None and old_total is not None and total == old_total
                 if total is not None:
                     previous_total = total
-                timestamp = event.get("timestamp")
-                if repeated or tokens is None or not isinstance(timestamp, str):
+                    context["_totals"] = total_usage
+                usage = last
+                if usage is None and total_usage:
+                    if old_total is None:
+                        usage = total_usage
+                    elif total > old_total:
+                        usage = {key: (total_usage[key] - before[key] if isinstance(before, dict)
+                                      and total_usage.get(key) is not None and before.get(key) is not None
+                                      and total_usage[key] >= before[key] else None) for key in total_usage}
+                        usage["total_tokens"] = total - old_total
+                    else:
+                        usage = None  # A correction/reset establishes a new baseline.
+                if duplicate or replay or usage is None:
                     continue
-                try:
-                    occurred_at = int(datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp())
-                except ValueError:
+                fingerprint = hashlib.sha256(json.dumps([event.get("timestamp"), total_usage, usage], sort_keys=True).encode()).hexdigest()
+                seen = context.setdefault("_seen_usage", [])
+                if fingerprint in seen:
                     continue
-                if occurred_at < cutoff:
-                    continue
-                bucket_at = occurred_at - occurred_at % 60
-                buckets[bucket_at] = buckets.get(bucket_at, 0) + tokens
-                if details is not None:
-                    detail = {field: _optional_nonnegative_int(usage.get(field)) for field in (
-                        "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens",
-                    )}
-                    detail.update(at=bucket_at, tokens=tokens, events=1,
-                                  model=context.get("model", "unknown"), effort=context.get("effort", "unknown"),
-                                  service_tier=context.get("service_tier", "unknown"),
-                                  reasoning_mode=context.get("reasoning_mode", "unknown"))
-                    details.append(detail)
+                seen.append(fingerprint)
+                context["_seen_usage"] = seen[-256:]
+                covered_by_compaction = False
+                for record in context.get("_compactions", {}).values():
+                    if record.get("usage") == usage or (total_usage is not None and record.get("thread_total") == total_usage):
+                        record["covered"] = True
+                        if record.get("emitted") and record.get("turn") == context.get("_turn", 0):
+                            covered_by_compaction = True
+                request_settings = {k: context[k] for k in ("model", "effort", "service_tier", "reasoning_mode") if k in context}
+                _execution_settings(request_settings, info)
+                if not covered_by_compaction:
+                    emit(usage, event.get("timestamp"), request_settings)
             next_offset = stream.tell()
+            # Pair compaction records in either order, after intervening local snapshots.
+            # Do not flush at a byte-budget boundary or an incomplete JSONL line.
+            if next_offset == size or (stop_offset is not None and next_offset >= stop_offset):
+                pending = context.get("_compactions", {})
+                for record in pending.values():
+                    if record.get("matched") and record.get("usage") and not record.get("emitted"):
+                        if not record.get("covered"):
+                            emit(record["usage"], record.get("timestamp"), record.get("settings", {}))
+                        record["emitted"] = True
+                # Completed IDs stay available across incremental reads for deduplication.
+                while len(pending) > 256:
+                    removable = next((key for key, record in pending.items() if record.get("emitted")), None)
+                    if removable is None:
+                        removable = next(iter(pending))
+                        context["_evicted_compactions"] = context.get("_evicted_compactions", 0) + 1
+                    del pending[removable]
     except OSError:
         return [], offset, initial_total
-    return [
-        {"at": at, "tokens": tokens}
-        for at, tokens in sorted(buckets.items())[-20_000:]
-    ], next_offset, previous_total
+    return [{"at": at, "tokens": value} for at, value in sorted(buckets.items())[-20_000:]], next_offset, previous_total
 
 
 def read_sessions(
@@ -596,6 +792,14 @@ def track_target_usage(
                           if isinstance(value, dict) and int(value.get("at") or 0) >= cutoff}
         detail_candidates = {key: value for key, value in (record.get("detail_candidates") or {}).items()
                              if isinstance(value, dict) and int(value.get("at") or 0) >= cutoff}
+        if rollout_path and record.get("usage_parser_version") != 2:
+            # Rebuild corrected details separately. The server keeps old data
+            # until a complete replacement has been received atomically.
+            detail_pending, detail_candidates = {}, {}
+            for key in ("usage_details_version", "detail_backfill_end", "detail_backfill_offset",
+                        "detail_backfill_total", "detail_backfill_context"):
+                record.pop(key, None)
+            record["usage_parser_version"] = 2
         if rollout_path:
             path = Path(str(rollout_path))
             previous_offset = record.get("rollout_offset")
@@ -621,7 +825,7 @@ def track_target_usage(
                 for bucket in new_buckets:
                     key = str(int(bucket["at"]))
                     candidates[key] = candidates.get(key, 0) + int(bucket["tokens"])
-            if record.get("usage_details_version") != 1 and path.is_file() and backfill_budget > 0:
+            if record.get("usage_details_version") != 2 and path.is_file() and backfill_budget > 0:
                 # Existing collectors know the account's historical continuity
                 # intervals. Re-read numeric usage plus turn execution metadata
                 # only; legacy total-token buckets must not be added again.
@@ -640,7 +844,7 @@ def track_target_usage(
                 for detail in recovered:
                     _merge_usage_detail(detail_candidates, detail)
                 if recovered_offset >= int(backfill_end):
-                    record["usage_details_version"] = 1
+                    record["usage_details_version"] = 2
                     if not (record.get("rollout_context") or {}).get("model"):
                         record["rollout_context"] = dict(backfill_context)
         remaining_candidates: dict[str, int] = {}
@@ -705,7 +909,10 @@ def track_target_usage(
             if key not in ("_rollout_path", "_usage_buckets")
         }
         attributed["tokens"] = target_tokens
-        attributed["usage_detail_backfill_complete"] = records[str(session["key"])].get("usage_details_version") == 1
+        if session.get("_rollout_path"):
+            attributed["usage_detail_schema"] = 2
+            attributed["usage_details_since"] = max(0, ((scan_at - 14 * 86400 + 59) // 60) * 60)
+        attributed["usage_detail_backfill_complete"] = records[str(session["key"])].get("usage_details_version") == 2
         verified_buckets = [
             {"at": int(at), "tokens": int(tokens)}
             for at, tokens in sorted(
@@ -721,7 +928,10 @@ def track_target_usage(
             details = sorted(records[str(session["key"])].get("usage_details", {}).values(), key=lambda item: item["at"])
             if details:
                 attributed["usage_details"] = details[-detail_budget:]
+                attributed["usage_detail_backfill_complete"] &= len(details) <= detail_budget
                 detail_budget -= len(attributed["usage_details"])
+        else:
+            attributed["usage_detail_backfill_complete"] = False
         tracked.append(attributed)
     return tracked
 
@@ -751,7 +961,7 @@ def snapshot(
     hostname, os_user = socket.gethostname(), getpass.getuser()
     return {
         "version": 1,
-        "collector": {"version": COLLECTOR_VERSION, "kind": "user"},
+        "collector": {"version": COLLECTOR_VERSION, "kind": "user", "observed_at": int(time.time())},
         "node": {
             "key": hashlib.sha256(f"{hostname}:{os_user}".encode()).hexdigest()[:12],
             "hostname": hostname,

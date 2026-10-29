@@ -4,6 +4,10 @@ Credit rates are not the included subscription budget. Never normalize these
 values against the account quota, or treat a session's latest model as history.
 """
 
+from datetime import datetime
+from bisect import bisect_left, bisect_right
+from statistics import median, quantiles
+
 from usage_aggregation import UsageWindow, utc_iso
 
 
@@ -21,6 +25,98 @@ STANDARD_RATES = {
     "gpt-5.6-luna": (5, 0.5, 30),
 }
 TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
+
+
+def _quota_calibration(db, account_key, weekly, now):
+    """Learn a conservative credit-to-quota scale from single-model intervals.
+
+    Provider percentages are rounded. Each positive change is paired with the
+    local request details accumulated since the previous change. Mixed model
+    or node intervals are excluded; the rate card is only used to compare
+    these measured intervals with other models.
+    """
+    if not weekly:
+        return None
+    if not weekly.get("limit_id") or not weekly.get("window_minutes"):
+        return {"status": "insufficient_clean_windows", "sample_count": 0, "observations": []}
+    resets_at = int(datetime.fromisoformat(weekly["resets_at"].replace("Z", "+00:00")).timestamp())
+    calibration_start = now - 14 * 86400
+    samples = list(db.execute(
+        """SELECT resets_at, sampled_at, used_percent FROM account_limit_samples
+           WHERE account_key=? AND limit_id=? AND window_kind='primary' AND window_minutes=?
+             AND sampled_at>=? AND sampled_at<=? ORDER BY resets_at, sampled_at""",
+        (account_key, weekly["limit_id"], weekly["window_minutes"], calibration_start, now),
+    ))
+    sample_groups = {}
+    for row in samples:
+        sample_groups.setdefault(row["resets_at"], []).append(row)
+    details = [dict(row) for row in db.execute(
+        """SELECT node_key, bucket_at, model, effort, service_tier, reasoning_mode,
+                  tokens, input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens
+           FROM collector_usage_details WHERE account_key=? AND bucket_at>=? AND bucket_at+60<=?
+           ORDER BY bucket_at""", (account_key, calibration_start, now),
+    )]
+    times = [row["bucket_at"] for row in details]
+    observations, selected_reset = [], None
+    # The provider may roll its reset timestamp during a plan/window change.
+    # Prefer the newest historical window with enough clean observations when
+    # the newly reported window has not accumulated a usable calibration yet.
+    candidates = sorted(
+        ((key, rows) for key, rows in sample_groups.items() if len(rows) >= 5),
+        key=lambda item: item[1][-1]["sampled_at"], reverse=True,
+    )
+    for candidate_reset, candidate_samples in candidates:
+        candidate_observations = []
+        previous = candidate_samples[0]
+        for current in candidate_samples[1:]:
+            delta = current["used_percent"] - previous["used_percent"]
+            elapsed = current["sampled_at"] - previous["sampled_at"]
+            if delta < 0:
+                previous = current
+                continue
+            if delta > 0 and elapsed <= 7200:
+                left = bisect_left(times, previous["sampled_at"] - 60)
+                right = bisect_right(times, current["sampled_at"] + 120)
+                interval = details[left:right]
+                identities = {(r["node_key"], r["model"], r["effort"]) for r in interval}
+                credits = []
+                if interval and len(identities) == 1:
+                    for row in interval:
+                        amount, _ = standard_reference(row)
+                        if amount is None:
+                            credits = []
+                            break
+                        credits.append(amount)
+                if credits:
+                    candidate_observations.append({
+                        "node_key": interval[0]["node_key"], "model": interval[0]["model"],
+                        "effort": interval[0]["effort"], "quota_percent": delta,
+                        "tokens": sum(row["tokens"] for row in interval),
+                        "credits": sum(credits), "seconds": elapsed,
+                    })
+            if delta > 0:
+                previous = current
+        if len(candidate_observations) > len(observations):
+            observations, selected_reset = candidate_observations, candidate_reset
+        if len(candidate_observations) >= 5:
+            observations, selected_reset = candidate_observations, candidate_reset
+            break
+    if len(observations) < 5:
+        return {"status": "insufficient_clean_windows", "sample_count": len(observations),
+                "observations": observations}
+    rates = [row["credits"] / row["quota_percent"] for row in observations]
+    ordered = sorted(rates)
+    quartiles = quantiles(ordered, n=4, method="inclusive")
+    return {
+        "status": "measured_single_model_windows" if abs(selected_reset - resets_at) <= 120
+                  else "historical_single_model_windows",
+        "sample_count": len(observations),
+        "period_ended_at": utc_iso(max(row["sampled_at"] for row in sample_groups[selected_reset])),
+        "credits_per_percent_point": median(rates),
+        "observed_range": {"low": min(rates), "high": max(rates)},
+        "middle_50_percent": {"low": quartiles[0], "high": quartiles[2]},
+        "observations": observations,
+    }
 
 
 def standard_reference(row):
@@ -90,11 +186,51 @@ def read_model_usage(db, account_key, weekly, now):
                 row["reference_unpriced_tokens"] += detail["tokens"]
                 reasons = row["reference_missing_reasons"]
                 reasons[status] = reasons.get(status, 0) + detail["tokens"]
+    calibration = _quota_calibration(db, account_key, weekly, now)
+    observed = calibration.get("observations", []) if calibration else []
+    direct_rates = {}
+    for row in observed:
+        direct_rates.setdefault((row["model"], row["effort"]), []).append(
+            row["tokens"] / row["quota_percent"]
+        )
+    direct_rate_summary = []
+    for (model, effort), rates in sorted(direct_rates.items()):
+        if len(rates) >= 3:
+            direct_rate_summary.append({
+                "model": model, "effort": effort, "sample_count": len(rates),
+                "tokens_per_percent_point": median(rates),
+                "observed_range": {"low": min(rates), "high": max(rates)},
+            })
     for scope, grouped in groups.items():
         rows = sorted(grouped.values(), key=lambda row: -row["tokens"])
         credits = [row["standard_reference_credits"] for row in rows if row["standard_reference_credits"] is not None]
         for row in rows:
             row["reference_status"] = "partial" if row["reference_priced_tokens"] and row["reference_unpriced_tokens"] else "complete" if row["standard_reference_credits"] is not None else "unavailable"
+            row["estimated_quota_percent"] = None
+            row["estimated_quota_percent_range"] = None
+            row["tokens_per_quota_percent_point"] = None
+            row["quota_estimation_basis"] = "unavailable"
+            if (scope == "weekly" and calibration and calibration.get("credits_per_percent_point")
+                    and row["standard_reference_credits"] is not None):
+                row["estimated_quota_percent"] = (
+                    row["standard_reference_credits"] / calibration["credits_per_percent_point"]
+                )
+                band = calibration.get("middle_50_percent") or {}
+                if band.get("low") and band.get("high"):
+                    row["estimated_quota_percent_range"] = {
+                        "low": row["standard_reference_credits"] / band["high"],
+                        "high": row["standard_reference_credits"] / band["low"],
+                    }
+                row["tokens_per_quota_percent_point"] = (
+                    row["tokens"] / row["standard_reference_credits"]
+                    * calibration["credits_per_percent_point"]
+                    if row["standard_reference_credits"] else None
+                )
+                direct = direct_rates.get((row["model"], row["effort"]), [])
+                row["quota_estimation_basis"] = (
+                    "direct_model_observation" if len(direct) >= 3
+                    else "standard_rate_extrapolation"
+                )
         scopes[scope].update({
             "rows": rows, "tokens": sum(row["tokens"] for row in rows),
             "standard_reference_credits": sum(credits) if credits else None,
@@ -111,7 +247,14 @@ def read_model_usage(db, account_key, weekly, now):
             ],
         },
         "quota_conversion": {
-            "status": "included_capacity_and_conversion_not_published",
-            "included_capacity_credits": None, "quota_percent": None,
+            "status": calibration["status"] if calibration else "no_weekly_limit",
+            "method": "median_standard_reference_credits_per_observed_quota_point",
+            "formula": "estimated_percent = model_standard_reference_credits / measured_credits_per_percent_point",
+            "calibration": ({key: value for key, value in calibration.items() if key != "observations"}
+                            if calibration else None),
+            "direct_model_rates": direct_rate_summary,
+            "model_token_formula": "tokens_per_1_percent = model_tokens / model_standard_reference_credits * measured_credits_per_percent_point",
+            "included_capacity_credits": None,
+            "quota_percent": None,
         },
     }

@@ -788,11 +788,51 @@ class UsageStoreTest(unittest.TestCase):
         self.store.ingest(report, now=1000030)
         user = next(row for row in self.store.dashboard(now=1000030)["weekly_quota"]["user_usage"] if row["node_key"] == "node-a")
         self.assertIsNone(user["used_percent"])
-        self.assertNotIn("estimated_used_percent", user)
+        self.assertEqual(user["estimated_used_percent"], 0.0)
         self.assertEqual(sum(row["tokens"] for row in user["usage_details"]), 1210)
         self.assertEqual(user["usage_details"][0]["model"], "small-model")
         self.assertEqual(user["usage_details"][0]["cached_input_tokens"], 990)
         self.assertEqual(user["collector_metadata"]["version"], "0.7.1")
+
+    def test_corrected_backfill_replaces_smaller_totals_and_rejects_stale_reports(self):
+        report = self.report(tokens=1200)
+        detail = {"at": 999960, "model": "small-model", "effort": "low", "service_tier": "unknown",
+                  "reasoning_mode": "standard", "tokens": 1200, "events": 1,
+                  "input_tokens": 1190, "cached_input_tokens": 1000, "output_tokens": 10, "reasoning_output_tokens": 0}
+        report["collector"] = {"version": "0.7.1"}
+        report["sessions"][0]["usage_details"] = [detail.copy()]
+        self.store.ingest(report, now=1000030)
+        report["collector"] = {"version": "0.7.2", "observed_at": 1000040}
+        report["sessions"][0].update(usage_detail_schema=2, usage_detail_backfill_complete=False,
+                                      usage_details_since=900000)
+        detail.update(tokens=100, input_tokens=90, cached_input_tokens=50, service_tier="fast")
+        report["sessions"][0]["usage_details"] = [detail.copy()]
+        self.store.ingest(report, now=1000040)
+        with self.store._connect_monitor() as db:
+            self.assertEqual(db.execute("SELECT SUM(tokens) FROM collector_usage_details").fetchone()[0], 1200)
+        report["sessions"][0]["usage_detail_backfill_complete"] = True
+        self.store.ingest(report, now=1000041)
+        self.store.ingest(report, now=1000042)
+        with self.store._connect_monitor() as db:
+            self.assertEqual(db.execute("SELECT SUM(tokens) FROM collector_usage_details").fetchone()[0], 100)
+            self.assertEqual(db.execute("SELECT SUM(tokens_used) FROM collector_session_usage").fetchone()[0], 100)
+            self.assertEqual(db.execute("SELECT service_tier FROM collector_usage_details").fetchone()[0], "fast")
+        report["collector"]["observed_at"] = 1000039
+        report["sessions"][0]["usage_details"] = []
+        self.store.ingest(report, now=1000043)
+        with self.store._connect_monitor() as db:
+            self.assertEqual(db.execute("SELECT SUM(tokens) FROM collector_usage_details").fetchone()[0], 100)
+
+    def test_invalid_token_components_are_rejected(self):
+        report = self.report()
+        detail = {"at": 999960, "tokens": 100, "events": 1, "input_tokens": 90,
+                  "output_tokens": 10, "cached_input_tokens": 91}
+        report["sessions"][0]["usage_details"] = [detail]
+        with self.assertRaisesRegex(ValueError, "cached"):
+            self.store.ingest(report, now=1000030)
+        detail.update(cached_input_tokens=0, reasoning_output_tokens=11)
+        with self.assertRaisesRegex(ValueError, "reasoning"):
+            self.store.ingest(report, now=1000030)
 
     def test_active_machine_collector_keeps_a_legacy_user_task_from_replacing_its_report(self):
         machine = self.report(tokens=100)

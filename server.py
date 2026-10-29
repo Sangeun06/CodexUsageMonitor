@@ -28,7 +28,7 @@ from typing import Any, Iterator
 from urllib.parse import parse_qs, urlparse
 
 from account_registry import initialize_accounts
-from quota_usage import read_quota_usage
+from quota_usage import read_quota_usage, reconcile_quota_usage
 from model_usage import read_model_usage
 
 from collector import COLLECTOR_VERSION, read_app_server_usage
@@ -234,6 +234,11 @@ class UsageStore:
                     PRIMARY KEY (account_key, node_key, session_key, bucket_at, model, effort, service_tier, reasoning_mode)
                 );
                 CREATE INDEX IF NOT EXISTS idx_usage_details_account_time ON collector_usage_details(account_key, bucket_at);
+                CREATE TABLE IF NOT EXISTS collector_detail_revisions (
+                    account_key TEXT NOT NULL, node_key TEXT NOT NULL, session_key TEXT NOT NULL,
+                    revision INTEGER NOT NULL, since_at INTEGER NOT NULL,
+                    PRIMARY KEY(account_key,node_key,session_key)
+                );
                 CREATE TABLE IF NOT EXISTS collector_usage_metadata (
                     account_key TEXT NOT NULL, node_key TEXT NOT NULL, version TEXT NOT NULL,
                     backfill_pending INTEGER NOT NULL, received_at INTEGER NOT NULL,
@@ -243,6 +248,8 @@ class UsageStore:
             )
             db.execute("BEGIN IMMEDIATE")
             metadata_columns = {row["name"] for row in db.execute("PRAGMA table_info(collector_usage_metadata)")}
+            if "observed_at" not in metadata_columns:
+                db.execute("ALTER TABLE collector_usage_metadata ADD COLUMN observed_at INTEGER NOT NULL DEFAULT 0")
             if "kind" not in metadata_columns:
                 db.execute("ALTER TABLE collector_usage_metadata ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown'")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(session_samples)")}
@@ -543,6 +550,7 @@ class UsageStore:
         clean_sessions = []
         clean_usage_buckets = []
         clean_details = []
+        replacements = []
         total_buckets = 0
         for session in sessions:
             if not isinstance(session, dict) or not session.get("key"):
@@ -559,6 +567,15 @@ class UsageStore:
             if raw_buckets is not None and not isinstance(raw_buckets, list):
                 raise ValueError("invalid session usage buckets")
             session_key = str(session["key"])[:64]
+            revised = session.get("usage_detail_schema") == 2
+            if revised:
+                raw_buckets = []
+            complete = session.get("usage_detail_backfill_complete") is True
+            if revised and complete:
+                since_at = self._nonnegative_int(session.get("usage_details_since"))
+                if since_at is None or since_at > now:
+                    raise ValueError("invalid usage detail coverage")
+                replacements.append((session_key, since_at))
             for bucket in raw_buckets or []:
                 if not isinstance(bucket, dict):
                     raise ValueError("invalid session usage bucket")
@@ -573,6 +590,8 @@ class UsageStore:
             raw_details = session.get("usage_details", [])
             if not isinstance(raw_details, list):
                 raise ValueError("invalid usage details")
+            if revised and not complete:
+                raw_details = []
             for detail in raw_details:
                 if not isinstance(detail, dict):
                     raise ValueError("invalid usage detail")
@@ -587,10 +606,21 @@ class UsageStore:
                 )]
                 if counts[0] is not None and counts[1] is not None and counts[1] > counts[0]:
                     raise ValueError("cached tokens exceed input tokens")
+                if counts[0] is not None and counts[2] is not None and counts[0] + counts[2] != tokens:
+                    raise ValueError("token components do not match total")
+                if counts[2] is not None and counts[3] is not None and counts[3] > counts[2]:
+                    raise ValueError("reasoning tokens exceed output tokens")
                 clean_details.append((account_key, node["key"][:64], session_key, at, *metadata, tokens, events, *counts))
                 if len(clean_details) > 50_000:
                     raise ValueError("too many usage details")
         with self._lock, self._connect_monitor() as db:
+            stored = db.execute("SELECT version, observed_at FROM collector_usage_metadata WHERE account_key=? AND node_key=?",
+                                (account_key, node["key"])).fetchone()
+            source_at = self._nonnegative_int(collector_info.get("observed_at")) or 0
+            if stored and source_at and source_at < stored["observed_at"]:
+                return
+            if stored and self._version_tuple(stored["version"]) >= (0, 7, 2) and self._version_tuple(str(collector_info.get("version") or "")) < self._version_tuple(stored["version"]):
+                return
             if isinstance(collector_info, dict) and collector_info.get("kind") == "user":
                 machine = db.execute(
                     "SELECT kind,received_at FROM collector_usage_metadata WHERE account_key=? AND node_key=?",
@@ -620,6 +650,15 @@ class UsageStore:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(*session, account_key) for session in clean_sessions],
             )
+            for session_key, since_at in replacements:
+                db.execute("DELETE FROM collector_usage_details WHERE account_key=? AND node_key=? AND session_key=?",
+                           (account_key, node["key"], session_key))
+                db.execute("DELETE FROM collector_session_usage WHERE account_key=? AND node_key=? AND session_key=? AND bucket_at>=?",
+                           (account_key, node["key"], session_key, since_at))
+                db.execute("INSERT OR REPLACE INTO collector_detail_revisions VALUES (?,?,?,?,?)",
+                           (account_key, node["key"], session_key, 2, since_at))
+            replacement_keys = {key for key, _ in replacements}
+            clean_usage_buckets = [row for row in clean_usage_buckets if row[1] not in replacement_keys]
             db.executemany(
                 """INSERT INTO collector_session_usage
                    (node_key, session_key, bucket_at, tokens_used, account_key) VALUES (?, ?, ?, ?, ?)
@@ -652,9 +691,9 @@ class UsageStore:
                 )
             if isinstance(collector_info, dict):
                 pending = sum(session.get("usage_detail_backfill_complete") is False for session in sessions)
-                db.execute("INSERT OR REPLACE INTO collector_usage_metadata (account_key,node_key,version,backfill_pending,received_at,kind) VALUES (?,?,?,?,?,?)",
+                db.execute("INSERT OR REPLACE INTO collector_usage_metadata (account_key,node_key,version,backfill_pending,received_at,kind,observed_at) VALUES (?,?,?,?,?,?,?)",
                            (account_key, node["key"], str(collector_info.get("version") or "unknown")[:40], pending, now,
-                            str(collector_info.get("kind") or "unknown")[:40]))
+                            str(collector_info.get("kind") or "unknown")[:40], source_at))
             db.execute("DELETE FROM collector_usage_details WHERE bucket_at < ?", (now - EVENT_RETENTION_DAYS * 86400,))
             db.execute(
                 "DELETE FROM collector_session_usage WHERE bucket_at < ?",
@@ -1065,8 +1104,10 @@ class UsageStore:
             nodes = db.execute("""SELECT n.node_key, n.hostname, n.os_user, a.account_json, a.seen_at
                 FROM collector_node_accounts a JOIN collector_nodes n USING(node_key)
                 WHERE a.account_key=?""", (account_key,)).fetchall()
-            sessions = db.execute("""SELECT s.*, n.hostname, n.os_user
+            sessions = db.execute("""SELECT s.*, n.hostname, n.os_user, r.since_at AS usage_details_since
                 FROM collector_sessions s JOIN collector_nodes n USING(node_key)
+                LEFT JOIN collector_detail_revisions r ON r.account_key=s.account_key
+                  AND r.node_key=s.node_key AND r.session_key=s.session_key
                 WHERE s.account_key=?""", (account_key,)).fetchall()
         if not include_local:
             nodes = [row for row in nodes if row["node_key"] != self.local_node_key()]
@@ -1081,7 +1122,8 @@ class UsageStore:
             {"key": row["session_key"], "project_key": row["project_key"], "project_name": row["project_name"],
              "model": row["model"], "tokens": row["tokens_used"], "created_at": row["created_at"],
              "updated_at": row["updated_at"], "archived": bool(row["archived"]), "node_key": row["node_key"],
-             "hostname": row["hostname"], "os_user": row["os_user"], "source": "collector"}
+             "hostname": row["hostname"], "os_user": row["os_user"], "source": "collector",
+             "usage_details_since": row["usage_details_since"]}
             for row in sessions
         ]
         return clean_nodes, clean_sessions
@@ -1258,6 +1300,26 @@ class UsageStore:
             weekly_quota = read_quota_usage(db, self.collector_account_key(), weekly_usage,
                                            aggregate_users(weekly_attribution), now, account_usage)
             model_usage = read_model_usage(db, self.collector_account_key(), weekly_usage, now)
+            reconcile_quota_usage(weekly_quota, model_usage, db, self.collector_account_key())
+            weekly_display_users = aggregate_users(weekly_attribution) if weekly_usage else None
+            if weekly_quota:
+                detail_totals = {user["node_key"]: user["tokens"] for user in weekly_quota["user_usage"]
+                                 if user.get("tokens") is not None}
+                weekly_display_users = [
+                    {**user, "tokens": detail_totals.get(user["node_key"], user["tokens"])}
+                    for user in weekly_display_users or []
+                ]
+                window = UsageWindow.weekly(weekly_usage, now)
+                by_session = {(row["node_key"], row["session_key"]): row["tokens"] for row in db.execute(
+                    """SELECT node_key, session_key, SUM(tokens) AS tokens FROM collector_usage_details
+                       WHERE account_key=? AND bucket_at>=? AND bucket_at+60<=?
+                       GROUP BY node_key,session_key""", (self.collector_account_key(), window.start, window.end))}
+                for session in sessions:
+                    if session["node_key"] in detail_totals:
+                        value = by_session.get((session["node_key"], session["key"]))
+                        session["weekly_tokens"] = value
+                        session["verified_weekly_tokens"] = value
+                        session["weekly_snapshot_only_tokens"] = None
         for session in sessions:
             session["created_at"] = utc_iso(session["created_at"])
             session["updated_at"] = utc_iso(session["updated_at"])
@@ -1304,7 +1366,7 @@ class UsageStore:
             "weekly_quota": weekly_quota,
             "model_usage": model_usage,
             "weekly_token_breakdown": weekly_token_breakdown,
-            "weekly_user_tokens": aggregate_users(weekly_attribution) if weekly_usage else None,
+            "weekly_user_tokens": weekly_display_users,
             "daily_user_trend": daily_user_trend,
             "analytics": analytics,
             "reconciliation": reconciliation,

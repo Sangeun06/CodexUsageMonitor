@@ -1,10 +1,9 @@
 /* Pure grouping helpers shared by the session table and project details. */
 const UsageView = (() => {
-  const percentNumber = new Intl.NumberFormat("ko-KR", {minimumFractionDigits: 2, maximumFractionDigits: 4});
-  function formatPercent(value, missing = "관측 대기") {
+  const percentNumber = new Intl.NumberFormat("ko-KR", {minimumFractionDigits: 1, maximumFractionDigits: 1});
+  function formatPercent(value, missing = "—") {
     if (value == null || !Number.isFinite(Number(value))) return missing;
     const numeric = Number(value);
-    if (numeric > 0 && numeric < 0.0001) return "<0.0001%";
     return `${percentNumber.format(numeric)}%`;
   }
   const sortGroups = groups => [...groups.values()].sort((a, b) => Number(b.active) - Number(a.active) || b.tokens - a.tokens);
