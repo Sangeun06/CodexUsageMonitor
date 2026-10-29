@@ -191,7 +191,7 @@ class CollectorTest(unittest.TestCase):
             self.assertTrue(apply_collector_update(update, root))
             self.assertEqual(target.read_bytes(), content)
             self.assertEqual((root / "collector.py.previous").read_text(), "OLD = True\n")
-            self.assertEqual(COLLECTOR_VERSION, "0.7.5")
+            self.assertEqual(COLLECTOR_VERSION, "0.7.6")
 
     def test_request_metadata_preserves_model_switches_and_cache_without_content(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -251,6 +251,29 @@ class CollectorTest(unittest.TestCase):
             with patch("collector.time.time", return_value=1150):
                 fresh = track_target_usage([session], "target", "target", auth, state, "node")[0]
             self.assertNotIn("usage_details", fresh)
+
+    def test_full_session_ledger_recovers_astra_details_across_polling_gap(self):
+        for target_tokens, expected in ((100, 100), (50, 0)):
+            with self.subTest(target_tokens=target_tokens), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path, auth, state = root/'rollout.jsonl', root/'auth.json', root/'state.json'
+                auth.write_text('{}')
+                os.utime(auth, (800,800))
+                path.write_text(json.dumps({'type':'turn_context','payload':{'model':'gpt-6-astra','effort':'high'}})+'\n'+
+                    json.dumps({'type':'event_msg','timestamp':'1970-01-01T00:18:20Z','payload':{'type':'token_count',
+                        'info':{'last_token_usage':{'total_tokens':100,'input_tokens':90,'cached_input_tokens':80,'output_tokens':10}}}})+'\n')
+                record = {'last_tokens':100,'target_tokens':target_tokens,'rollout_offset':path.stat().st_size}
+                state.write_text(json.dumps({'version':2,'profiles':{'node':{'sessions':{'s':record},
+                    'last_account_key':'target','last_scan_at':1020,
+                    'account_intervals':[{'start':900,'end':1020,'account_key':'target'}]}}}))
+                session = {'key':'s','tokens':150,'created_at':900,'updated_at':1100,'_rollout_path':str(path)}
+                with patch('collector.time.time',return_value=2000):
+                    result=track_target_usage([session],'target','target',auth,state,'node')[0]
+                rows=result.get('usage_details',[])
+                self.assertEqual(sum(row['tokens'] for row in rows),expected)
+                if expected:
+                    self.assertEqual(rows[0]['model'],'gpt-6-astra')
+                    self.assertEqual(rows[0]['effort'],'high')
 
     def test_app_server_snapshot_keeps_only_aggregate_usage(self):
         result = normalize_app_server_snapshot(

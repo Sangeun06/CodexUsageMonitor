@@ -57,6 +57,9 @@ def _quota_calibration(db, account_key, weekly, now):
            ORDER BY bucket_at""", (account_key, calibration_start, now),
     )]
     times = [row["bucket_at"] for row in details]
+    weekly_window = UsageWindow.weekly(weekly, now)
+    weekly_credits = sum(standard_reference(row)[0] or 0 for row in details
+                         if weekly_window.start <= row["bucket_at"] and row["bucket_at"] + 60 <= weekly_window.end)
     observations, selected_reset = [], None
     # The provider may roll its reset timestamp during a plan/window change.
     # Prefer the newest historical window with enough clean observations when
@@ -96,9 +99,18 @@ def _quota_calibration(db, account_key, weekly, now):
                     })
             if delta > 0:
                 previous = current
-        if len(candidate_observations) > len(observations):
-            observations, selected_reset = candidate_observations, candidate_reset
         if len(candidate_observations) >= 5:
+            candidate_rates = [row["credits"] / row["quota_percent"] for row in candidate_observations]
+            lower, _, upper = quantiles(candidate_rates, n=4, method="inclusive")
+            candidate_rate = median(candidate_rates)
+            # Sparse/misaligned detail windows can produce tiny denominators.
+            # Reject unstable candidates and those contradicting the provider
+            # meter. Never inflate or rescale user usage to fit that meter.
+            if lower <= 0 or upper > lower * 2:
+                continue
+            used = weekly.get("used_percent")
+            if used is not None and weekly_credits / candidate_rate > used + 1e-9:
+                continue
             observations, selected_reset = candidate_observations, candidate_reset
             break
     if len(observations) < 5:

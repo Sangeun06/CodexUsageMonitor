@@ -44,6 +44,27 @@ class ModelUsageTest(unittest.TestCase):
         self.assertIsNone(row["quota_percent"])
         self.assertEqual(row["reference_status"], "complete")
 
+    def test_tiny_new_reference_cannot_replace_history_when_it_exceeds_account_meter(self):
+        from model_usage import _quota_calibration
+        self.db.execute("CREATE TABLE account_limit_samples (account_key,limit_id,window_kind,window_minutes,resets_at,sampled_at,used_percent)")
+        weekly = {**self.weekly, "limit_id": "codex", "window_minutes": 10080, "used_percent": 70}
+        reset = self.now + 60
+        for rate, start, end in [(115, self.now-7200, reset-86400), (6, self.now-1800, reset)]:
+            for index in range(6):
+                at = start + index * 300
+                self.db.execute("INSERT INTO account_limit_samples VALUES (?,?,?,?,?,?,?)",
+                                ('a','codex','primary',10080,end,at,index))
+                if index:
+                    output = rate * 4000
+                    self.detail(at=at-120, tokens=output, input_tokens=0,
+                                cached_input_tokens=0, output_tokens=output, reasoning_output_tokens=0)
+        calibration = _quota_calibration(self.db, 'a', weekly, self.now)
+        self.assertEqual(calibration['credits_per_percent_point'], 115)
+        self.assertEqual(calibration['status'], 'historical_single_model_windows')
+        # With no valid history, retain unknown instead of accepting the bad rate.
+        self.db.execute("DELETE FROM account_limit_samples WHERE resets_at=?", (reset-86400,))
+        self.assertNotIn('credits_per_percent_point', _quota_calibration(self.db, 'a', weekly, self.now))
+
     def test_actual_models_within_session_and_archived_project_are_preserved(self):
         self.session(archived=1)
         self.detail()

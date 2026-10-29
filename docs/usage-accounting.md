@@ -1,4 +1,4 @@
-# Codex usage accounting (collector 0.7.5)
+# Codex usage accounting (collector 0.7.6)
 
 Reference: https://github.com/ccusage/ccusage/blob/main/rust/adapters/codex/src/README.md
 
@@ -8,9 +8,9 @@ Reference: https://github.com/ccusage/ccusage/blob/main/rust/adapters/codex/src/
 - Use each request's recorded model, effort and service tier. Settings without a tier preserve the last recorded tier; explicit unsupported tiers clear it. `priority`/`fast` normalize to Fast, `default`/`standard` to Standard. Current config is not evidence of historical request settings.
 - Probe the actual replay boundary, without relying on the session CLI version. Exclude history preceding `task_started` or `inter_agent_communication[_metadata]` with `trigger_turn=true`. For legacy forks with an available local parent, compare leading numeric usage with the parent's pre-fork history.
 - Match compaction usage and markers by hashed response ID in either order. Do not add local snapshots that already cover the compaction request. Preserve the request timestamp and settings. Copied parent compaction IDs are excluded for legacy fork matching.
-- Parser revision 2 rebuilds the last 14 days using existing account continuity intervals. Incomplete or truncated backfills do not replace stored detail rows. Complete reports atomically replace corrected session details and minute counters, including lower totals and empty replay-only histories. In that coverage interval, period totals use corrected events instead of raw session lifetime snapshots.
+- Parser revision 3 rebuilds the last 14 days using existing account continuity intervals. A pre-existing ledger assigning an entire session to the same account, with authentication predating session creation, also permits request-detail recovery across polling gaps; fresh installs and split-account ledgers do not. Incomplete or truncated backfills preserve legacy history; newly parsed minutes after the stored history boundary are published immediately. Recent sessions have priority over old logs. Complete reports atomically replace corrected session details and minute counters, including lower totals and empty replay-only histories. In that coverage interval, period totals use corrected events instead of raw session lifetime snapshots.
 - Reject older collector versions after revision 2 reports arrive; reject out-of-order report timestamps. Preserve account/node/session identity boundaries.
-- API-equivalent cost estimates and provider quota percentages remain distinct. Observed attribution plus calibrated estimates plus unallocated quota equals the provider total. Estimates never expand to fill unallocated usage. Estimates exceeding the provider meter remain visible as an estimation excess; their conversion denominator is not silently rescaled. Display rounded tenths with a largest-remainder allocation; retain full precision internally.
+- API-equivalent cost estimates and provider quota percentages remain distinct. Observed attribution plus calibrated estimates plus unallocated quota equals the provider total. Estimates never expand to fill unallocated usage. Calibration candidates with an unstable interquartile spread or projected usage above the provider meter are rejected. Valid older windows may be used; no numeric denominator is hardcoded. Conflicting final model estimates are suppressed instead of being rescaled. Display rounded tenths with a largest-remainder allocation; retain full precision internally.
 
 ## Limits
 

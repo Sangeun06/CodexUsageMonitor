@@ -180,7 +180,7 @@ class ReconciliationRegressionTest(unittest.TestCase):
         self.assertAlmostEqual(quota['user_usage'][0]['display_used_percent'], .4)
         self.assertEqual(quota['observed_percent'], 0)
 
-    def test_observations_and_raw_model_estimates_are_preserved(self):
+    def test_conflicting_model_estimates_are_rejected_without_scaling_observations(self):
         from quota_usage import reconcile_quota_usage
         quota = {'used_percent': 3.0, 'user_usage': [
             {'node_key': 'a', 'tokens': 100, 'used_percent': 1, 'observed_used_percent': 1}]}
@@ -188,6 +188,8 @@ class ReconciliationRegressionTest(unittest.TestCase):
                     standard_reference_credits=10, estimated_quota_percent=10)]}}}
         reconcile_quota_usage(quota, model)
         self.assertEqual(quota['observed_percent'], 1)
-        self.assertEqual(quota['estimated_percent'], 9)
-        self.assertEqual(quota['over_estimated_percent'], 7)
-        self.assertEqual(quota['unattributed_percent'], 0)
+        self.assertEqual(quota['estimated_percent'], 0)
+        self.assertEqual(quota['over_estimated_percent'], 0)
+        self.assertEqual(quota['unattributed_percent'], 2)
+        self.assertEqual(quota['conversion_status'], 'rejected_account_total_conflict')
+        self.assertIsNone(model['scopes']['weekly']['rows'][0]['estimated_quota_percent'])

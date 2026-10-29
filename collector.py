@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_LOG_BACKUPS = 3
 APP_SERVER_TIMEOUT_SECONDS = 15
-COLLECTOR_VERSION = "0.7.5"
+COLLECTOR_VERSION = "0.7.6"
 UPDATE_FILE_NAMES = {"collector.py", "collector_windows_machine.py"}
 
 
@@ -737,10 +737,21 @@ def track_target_usage(
         intervals.append({"start": scan_at, "end": scan_at, "account_key": current_account_key})
 
     backfill_budget = 32 * 1024 * 1024
+    # Recent requests must not wait behind old multi-gigabyte session files.
+    sessions = sorted(sessions, key=lambda session: int(session.get("updated_at") or 0), reverse=True)
     for session in sessions:
         session_key = str(session["key"])
         current_tokens = max(0, int(session.get("tokens") or 0))
         record = records.get(session_key)
+        existing_full_ownership = (
+            isinstance(record, dict) and current_tokens > 0
+            and bool(session.get("_rollout_path"))
+            and int(record.get("target_tokens") or 0) > 0
+            and int(record.get("target_tokens") or 0) == int(record.get("last_tokens") or 0)
+            and int(record.get("last_tokens") or 0) <= current_tokens
+            and previous_account_key == current_account_key == target_account_key
+            and int(session.get("created_at") or 0) >= login_transition_at - 5
+        )
         if isinstance(record, str):
             # Migrate the v0.4.3 first-account binding conservatively.
             record = {
@@ -757,7 +768,7 @@ def track_target_usage(
             if accumulate and continuous and current_tokens >= previous_tokens and delta_account_key == target_account_key:
                 target_tokens += current_tokens - previous_tokens
             record["last_tokens"] = current_tokens
-            record["target_tokens"] = target_tokens
+            record["target_tokens"] = current_tokens if existing_full_ownership and accumulate else target_tokens
         else:
             can_claim_initial = (
                 accumulate and current_account_key == target_account_key
@@ -792,14 +803,14 @@ def track_target_usage(
                           if isinstance(value, dict) and int(value.get("at") or 0) >= cutoff}
         detail_candidates = {key: value for key, value in (record.get("detail_candidates") or {}).items()
                              if isinstance(value, dict) and int(value.get("at") or 0) >= cutoff}
-        if rollout_path and record.get("usage_parser_version") != 2:
+        if rollout_path and record.get("usage_parser_version") != 3:
             # Rebuild corrected details separately. The server keeps old data
             # until a complete replacement has been received atomically.
             detail_pending, detail_candidates = {}, {}
             for key in ("usage_details_version", "detail_backfill_end", "detail_backfill_offset",
                         "detail_backfill_total", "detail_backfill_context"):
                 record.pop(key, None)
-            record["usage_parser_version"] = 2
+            record["usage_parser_version"] = 3
         if rollout_path:
             path = Path(str(rollout_path))
             previous_offset = record.get("rollout_offset")
@@ -825,7 +836,7 @@ def track_target_usage(
                 for bucket in new_buckets:
                     key = str(int(bucket["at"]))
                     candidates[key] = candidates.get(key, 0) + int(bucket["tokens"])
-            if record.get("usage_details_version") != 2 and path.is_file() and backfill_budget > 0:
+            if record.get("usage_details_version") != 3 and path.is_file() and backfill_budget > 0:
                 # Existing collectors know the account's historical continuity
                 # intervals. Re-read numeric usage plus turn execution metadata
                 # only; legacy total-token buckets must not be added again.
@@ -844,7 +855,7 @@ def track_target_usage(
                 for detail in recovered:
                     _merge_usage_detail(detail_candidates, detail)
                 if recovered_offset >= int(backfill_end):
-                    record["usage_details_version"] = 2
+                    record["usage_details_version"] = 3
                     if not (record.get("rollout_context") or {}).get("model"):
                         record["rollout_context"] = dict(backfill_context)
         remaining_candidates: dict[str, int] = {}
@@ -876,6 +887,11 @@ def track_target_usage(
             if interval is not None:
                 if accumulate and interval.get("account_key") == target_account_key:
                     _merge_usage_detail(detail_pending, detail)
+            elif accumulate and existing_full_ownership and occurred_at + 60 > int(session.get("created_at") or 0):
+                # A pre-existing ledger assigning the ENTIRE session to this
+                # account can recover its request breakdown across a polling
+                # gap. A fresh login, split ledger or first scan cannot.
+                _merge_usage_detail(detail_pending, detail)
             elif occurred_at + 60 > scan_at:
                 remaining_details[key] = detail
         record["usage_details"] = detail_pending
@@ -912,7 +928,7 @@ def track_target_usage(
         if session.get("_rollout_path"):
             attributed["usage_detail_schema"] = 2
             attributed["usage_details_since"] = max(0, ((scan_at - 14 * 86400 + 59) // 60) * 60)
-        attributed["usage_detail_backfill_complete"] = records[str(session["key"])].get("usage_details_version") == 2
+        attributed["usage_detail_backfill_complete"] = records[str(session["key"])].get("usage_details_version") == 3
         verified_buckets = [
             {"at": int(at), "tokens": int(tokens)}
             for at, tokens in sorted(

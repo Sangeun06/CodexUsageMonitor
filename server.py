@@ -239,6 +239,10 @@ class UsageStore:
                     revision INTEGER NOT NULL, since_at INTEGER NOT NULL,
                     PRIMARY KEY(account_key,node_key,session_key)
                 );
+                CREATE TABLE IF NOT EXISTS collector_partial_detail_windows (
+                    account_key TEXT NOT NULL, node_key TEXT NOT NULL, session_key TEXT NOT NULL,
+                    since_at INTEGER NOT NULL, PRIMARY KEY(account_key,node_key,session_key)
+                );
                 CREATE TABLE IF NOT EXISTS collector_usage_metadata (
                     account_key TEXT NOT NULL, node_key TEXT NOT NULL, version TEXT NOT NULL,
                     backfill_pending INTEGER NOT NULL, received_at INTEGER NOT NULL,
@@ -551,6 +555,7 @@ class UsageStore:
         clean_usage_buckets = []
         clean_details = []
         replacements = []
+        partial_sessions = set()
         total_buckets = 0
         for session in sessions:
             if not isinstance(session, dict) or not session.get("key"):
@@ -591,7 +596,7 @@ class UsageStore:
             if not isinstance(raw_details, list):
                 raise ValueError("invalid usage details")
             if revised and not complete:
-                raw_details = []
+                partial_sessions.add(session_key)
             for detail in raw_details:
                 if not isinstance(detail, dict):
                     raise ValueError("invalid usage detail")
@@ -657,6 +662,25 @@ class UsageStore:
                            (account_key, node["key"], session_key, since_at))
                 db.execute("INSERT OR REPLACE INTO collector_detail_revisions VALUES (?,?,?,?,?)",
                            (account_key, node["key"], session_key, 2, since_at))
+                db.execute("DELETE FROM collector_partial_detail_windows WHERE account_key=? AND node_key=? AND session_key=?",
+                           (account_key, node["key"], session_key))
+            partial_starts = {}
+            for session_key in partial_sessions:
+                db.execute("""INSERT OR IGNORE INTO collector_partial_detail_windows
+                    SELECT ?,?,?,COALESCE(MAX(bucket_at)+60,?) FROM collector_usage_details
+                    WHERE account_key=? AND node_key=? AND session_key=?""",
+                           (account_key, node["key"], session_key, (now - 14 * 86400 + 59) // 60 * 60,
+                            account_key, node["key"], session_key))
+                partial_starts[session_key] = db.execute(
+                    "SELECT since_at FROM collector_partial_detail_windows WHERE account_key=? AND node_key=? AND session_key=?",
+                    (account_key, node["key"], session_key)).fetchone()[0]
+            # Old history remains untouched until full backfill. Newly parsed
+            # minutes are already useful and must not wait behind a huge log.
+            clean_details = [row for row in clean_details
+                             if row[2] not in partial_starts or row[3] >= partial_starts[row[2]]]
+            for session_key, at in {(row[2], row[3]) for row in clean_details if row[2] in partial_starts}:
+                db.execute("DELETE FROM collector_usage_details WHERE account_key=? AND node_key=? AND session_key=? AND bucket_at=?",
+                           (account_key, node["key"], session_key, at))
             replacement_keys = {key for key, _ in replacements}
             clean_usage_buckets = [row for row in clean_usage_buckets if row[1] not in replacement_keys]
             db.executemany(

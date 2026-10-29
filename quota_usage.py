@@ -35,6 +35,20 @@ def reconcile_quota_usage(quota, model_usage, db=None, account_key=None):
                 "used_percent": None, "observed_used_percent": None}
         quota["user_usage"].append(user)
         users[node] = user
+    projected = sum(max(user.get("observed_used_percent") or 0, weights.get(node, 0))
+                    for node, user in users.items())
+    if projected > quota["used_percent"] + 1e-9:
+        # A conflicting estimate is invalid, not a share to scale or clip.
+        weights = {}
+        quota["conversion_status"] = "rejected_account_total_conflict"
+        for row in rows:
+            row["rejected_quota_percent"] = row.get("estimated_quota_percent")
+            row["estimated_quota_percent"] = None
+            row["estimated_quota_percent_range"] = None
+            row["tokens_per_quota_percent_point"] = None
+            row["quota_estimation_basis"] = "invalid_calibration"
+    else:
+        quota["conversion_status"] = "consistent_with_account_total"
     observed = sum(user.get("observed_used_percent") or 0 for user in users.values())
     weights = {node: max(0.0, value - (users[node].get("observed_used_percent") or 0))
                for node, value in weights.items()}

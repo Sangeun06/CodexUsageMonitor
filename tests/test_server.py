@@ -834,6 +834,28 @@ class UsageStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "reasoning"):
             self.store.ingest(report, now=1000030)
 
+    def test_incomplete_backfill_keeps_old_history_but_publishes_live_minutes(self):
+        report = self.report(tokens=1200)
+        old = dict(at=999900, model='small-model', effort='low', tokens=1200, events=1)
+        report['sessions'][0]['usage_details'] = [old]
+        report['collector'] = dict(version='0.7.4')
+        self.store.ingest(report, now=1000030)
+        corrected_old = {**old, 'tokens': 100}
+        live = {**old, 'at':999960, 'tokens':200}
+        report['collector'] = dict(version='0.7.5', observed_at=1000040)
+        report['sessions'][0].update(usage_detail_schema=2, usage_detail_backfill_complete=False,
+                                      usage_details_since=900000, usage_details=[corrected_old,live])
+        self.store.ingest(report, now=1000040)
+        self.store.ingest(report, now=1000041)
+        with self.store._connect_monitor() as db:
+            values = db.execute('SELECT bucket_at,SUM(tokens) FROM collector_usage_details GROUP BY bucket_at ORDER BY bucket_at').fetchall()
+            self.assertEqual([tuple(r) for r in values], [(999900,1200),(999960,200)])
+        report['sessions'][0]['usage_detail_backfill_complete'] = True
+        self.store.ingest(report, now=1000042)
+        with self.store._connect_monitor() as db:
+            self.assertEqual(db.execute('SELECT SUM(tokens) FROM collector_usage_details').fetchone()[0],300)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM collector_partial_detail_windows').fetchone()[0],0)
+
     def test_active_machine_collector_keeps_a_legacy_user_task_from_replacing_its_report(self):
         machine = self.report(tokens=100)
         machine["collector"] = {"version": "0.7.1", "kind": "windows-machine"}
